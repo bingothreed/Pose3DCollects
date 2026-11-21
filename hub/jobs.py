@@ -188,24 +188,25 @@ class JobManager:
                 params = dict(job["params"])
                 input_path = self._dir(job_id) / job["input_file"]
             status = engines.instant_status(self.cfg)
-            if not status["ready"]:
-                missing = []
-                if not status["root_ok"]:
-                    missing.append("项目目录")
-                if not status["python_ok"]:
-                    missing.append("Python 环境")
-                if not status["deps_ok"]:
-                    missing.append("依赖")
-                if not status["selected_model_ok"]:
-                    missing.append("模型")
-                if not status["body_ok"]:
-                    missing.append("mhr-body.onnx")
+            tier = params.get("model") or status.get("selected_model") or "medium"
+            fit = params.get("fit")
+            if fit is None:
+                fit = status.get("fit") or 0
+            model_path = engines.instant_model_path(self.cfg, tier, int(fit))
+            missing = []
+            if not status["root_ok"]:
+                missing.append("项目目录")
+            if not status["python_ok"]:
+                missing.append("Python 环境")
+            if not status["deps_ok"]:
+                missing.append("依赖")
+            if not model_path.is_file():
+                missing.append(f"模型 {model_path.name}")
+            if not status["body_ok"]:
+                missing.append("mhr-body.onnx")
+            if missing:
                 raise RuntimeError("InstantHMR 尚未就绪，缺少: " + "、".join(missing)
                                    + "（到“设置与资源”里一键准备）")
-            model_path = Path(status["selected_model_path"]) if status.get("selected_model_path") else None
-            if model_path is None:
-                model_file = next(m for m in status["models"] if m["selected"])["path"]
-                model_path = Path(model_file)
             body_path = Path(status["body"]["path"])
             out_dir = self._dir(job_id)
             video_name = "video.mp4"

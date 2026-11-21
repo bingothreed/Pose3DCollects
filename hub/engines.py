@@ -28,6 +28,19 @@ def instant_model_filename(tier: str, fit: int) -> str:
     return f"instanthmr-{tier}-fit{fit}.onnx" if fit else f"instanthmr-{tier}.onnx"
 
 
+def instant_models_dir(cfg: dict) -> Path:
+    engine = cfg["engines"]["instanthmr"]
+    return Path(engine.get("models_dir") or Path(engine["root"]) / "models")
+
+
+def instant_model_path(cfg: dict, tier: str | None = None, fit: int | None = None) -> Path:
+    """Resolve one tier/fit ONNX file; missing values fall back to the config default."""
+    engine = cfg["engines"]["instanthmr"]
+    tier = tier or engine.get("model") or "medium"
+    fit = int(engine.get("fit") or 0) if fit is None else int(fit)
+    return instant_models_dir(cfg) / instant_model_filename(tier, fit)
+
+
 def _module_cache_key(python: str, modules: tuple[str, ...]) -> tuple:
     return (python, modules)
 
@@ -92,7 +105,7 @@ def flow_python(cfg: dict) -> str:
 
 def _instant_models(cfg: dict) -> list[dict]:
     engine = cfg["engines"]["instanthmr"]
-    models_dir = Path(engine.get("models_dir") or Path(engine["root"]) / "models")
+    models_dir = instant_models_dir(cfg)
     fit = int(engine.get("fit") or 0)
     models = []
     for tier in INSTANT_TIERS:
@@ -113,6 +126,16 @@ def instant_status(cfg: dict) -> dict:
     root = Path(engine["root"])
     python = instant_python(cfg)
     models, body = _instant_models(cfg)
+    models_dir = instant_models_dir(cfg)
+    variants = []
+    for tier in INSTANT_TIERS:
+        for fit_value in (0, 1, 2):
+            name = instant_model_filename(tier, fit_value)
+            info = file_info(models_dir / name)
+            variants.append({
+                "tier": tier, "fit": fit_value, "file": name,
+                "exists": info["exists"], "size": info["size"],
+            })
     selected = next((m for m in models if m["selected"]), models[3] if len(models) > 3 else models[0])
     deps = check_modules(python, INSTANT_MODULES) if python else {m: False for m in INSTANT_MODULES}
     dl_deps = check_modules(python, INSTANT_DOWNLOAD_MODULES) if python else {}
@@ -139,6 +162,7 @@ def instant_status(cfg: dict) -> dict:
         "download_deps": dl_deps,
         "deps_ok": deps_ok,
         "models": models,
+        "variants": variants,
         "selected_model": selected["id"],
         "selected_model_path": selected["path"],
         "selected_model_ok": model_ok,
@@ -181,6 +205,10 @@ def flow_layout(root: Path) -> dict:
 def _model_row(label: str, path: Path, required: bool, note: str = "") -> dict:
     info = file_info(path)
     return {"label": label, "path": str(path), "required": required, "note": note, **info}
+
+
+def _files_exist(*paths: Path) -> bool:
+    return all(Path(path).is_file() for path in paths)
 
 
 _RUNTIME_SLOT_MARKERS = (
@@ -272,6 +300,35 @@ def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
     core_ok = (layout["main"].is_file() and layout["main_cfg"].is_file()
                and layout["yolox"].is_file() and layout["sam"].is_file() and body_ok)
     vggt_ok = layout["vggt"].is_file()
+    enhancements = {
+        "hamer": {"available": False, "reason": "unsupported", "requires_gpu": True},
+        "torso": {"available": False, "reason": "unsupported"},
+        "crossing": {"available": False, "reason": "unsupported"},
+    }
+    if layout["kind"] == "windows":
+        models_root = root / "models"
+        hamer_files_ok = _files_exist(
+            models_root / "hamer" / "hamer.ckpt",
+            models_root / "hamer" / "model_config.yaml",
+            models_root / "hamer" / "mano_mean_params.npz",
+            models_root / "mano_v1_2" / "models" / "MANO_LEFT.pkl",
+            models_root / "mano_v1_2" / "models" / "MANO_RIGHT.pkl",
+        ) and (root / "third_party" / "hamer_inference").is_dir()
+        torso_ok = _files_exist(models_root / "flowhmr_base" / "flowhmr_base.ckpt",
+                                models_root / "flowhmr_base" / "config.yml")
+        crossing_ok = (_files_exist(models_root / "sam2" / "sam2.1_hiera_small.pt")
+                       and (root / "third_party" / "sam2_runtime").is_dir())
+        device_kind = str(engine.get("device") or "auto").split(":", 1)[0]
+        hamer_ok = hamer_files_ok and device_kind != "cpu"
+        enhancements = {
+            "hamer": {
+                "available": hamer_ok,
+                "reason": "" if hamer_ok else ("gpu_required" if hamer_files_ok else "missing"),
+                "requires_gpu": True,
+            },
+            "torso": {"available": torso_ok, "reason": "" if torso_ok else "missing"},
+            "crossing": {"available": crossing_ok, "reason": "" if crossing_ok else "missing"},
+        }
     runtime = flow_runtime_info(root, python)
     runtime_ok = runtime is None or runtime["installed"]
     static_camera = bool(engine.get("static_camera"))
@@ -289,6 +346,7 @@ def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
         "manual_select": bool(engine.get("manual_select")),
         "manual_select_forced": layout["kind"] == "windows",
         "layout": layout["kind"],
+        "enhancements": enhancements,
         "root_ok": root_ok,
         "python_ok": python_ok,
         "models": models,

@@ -547,6 +547,24 @@ html[data-theme="light"] .tabbar { background: rgba(250, 251, 255, 0.62); }
 .hint { margin: 10px 0 16px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .hint.warn { color: var(--amber); }
 .hint.bad { color: var(--red); }
+.precision-hint { margin: 6px 0 0; }
+.precision-hint:empty { display: none; }
+.enhance-grid { display: flex; flex-direction: column; gap: 8px; margin-top: 15px; }
+.enhance-item {
+  display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--bg-2);
+  cursor: pointer;
+}
+.enhance-item input[type="checkbox"] {
+  width: 15px; height: 15px; margin: 1px 0 0; padding: 0;
+  flex: none; accent-color: var(--accent);
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  background: var(--bg);
+}
+.enhance-item > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.enhance-item strong { font-size: 11.5px; font-weight: 600; color: var(--text-2); }
+.enhance-item small { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+.enhance-item.unavailable { opacity: 0.55; cursor: not-allowed; }
 .hint a { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 2px; }
 
 /* ------------------------------------------------------------------ person picker */

@@ -34,7 +34,8 @@ export const selectPerson = (id, person) => postJson(`/api/jobs/${id}/select`, {
 export const getMeta = (job) => json(job.urls.meta);
 export const getTrack = (job) => json(job.urls.track);
 
-export function uploadJob({ engine, file, maxFrames, autoFrames, onProgress }) {
+export function uploadJob({ engine, file, maxFrames, autoFrames, model, fit, steps,
+                            hamer, torsoOpt, crossing, onProgress }) {
   return new Promise((resolve, reject) => {
     const query = new URLSearchParams({
       engine,
@@ -42,6 +43,12 @@ export function uploadJob({ engine, file, maxFrames, autoFrames, onProgress }) {
       max_frames: String(maxFrames ?? 0),
       auto_frames: autoFrames ? "1" : "0",
     });
+    if (model) query.set("model", model);
+    if (fit !== undefined && fit !== null) query.set("fit", String(fit));
+    if (steps !== undefined && steps !== null) query.set("steps", String(steps));
+    if (hamer !== undefined) query.set("hamer", hamer ? "1" : "0");
+    if (torsoOpt !== undefined) query.set("torso_opt", torsoOpt ? "1" : "0");
+    if (crossing !== undefined) query.set("crossing_opt", crossing ? "1" : "0");
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", `/api/jobs?${query}`);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");

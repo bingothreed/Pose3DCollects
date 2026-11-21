@@ -157,6 +157,65 @@
             </label>
           </div>
 
+          <div class="field-grid" id="instantPrecisionFields">
+            <label class="field">
+              <span data-i18n="job.precision.model">模型精度</span>
+              <select id="instantTierJob">
+                <option value="nano" data-i18n="tier.nano">Nano · 最快</option>
+                <option value="tiny" data-i18n="tier.tiny">Tiny · 轻量</option>
+                <option value="small" data-i18n="tier.small">Small · 均衡</option>
+                <option value="medium" selected data-i18n="tier.medium">Medium · 最准</option>
+                <option value="medium-commercial" data-i18n="tier.medium-commercial">Medium Commercial · 可商用</option>
+              </select>
+            </label>
+            <label class="field">
+              <span data-i18n="settings.fit">拟合</span>
+              <select id="instantFitJob">
+                <option value="0" data-i18n="settings.fit.network">网络直出</option>
+                <option value="1" data-i18n="settings.fit.one">Fit · 1 crop</option>
+                <option value="2" selected data-i18n="settings.fit.two">Fit · 2 crops</option>
+              </select>
+            </label>
+          </div>
+          <p class="hint precision-hint" id="instantPrecisionHint"></p>
+
+          <div class="field-grid compact" id="flowPrecisionFields">
+            <label class="field">
+              <span data-i18n="job.precision.flow">生成精度</span>
+              <select id="flowStepsJob">
+                <option value="10" data-i18n="job.precision.fast">快速 · 10 步</option>
+                <option value="20" selected data-i18n="job.precision.balanced">标准 · 20 步</option>
+                <option value="40" data-i18n="job.precision.fine">精细 · 40 步</option>
+              </select>
+              <small data-i18n="job.precision.stepsHint">步数越多动作越精细，耗时越长</small>
+            </label>
+          </div>
+
+          <div class="enhance-grid" id="flowEnhanceFields">
+            <label class="enhance-item">
+              <input type="checkbox" id="flowHamer">
+              <span>
+                <strong data-i18n="job.enhance.hamer">HaMeR 手指精修</strong>
+                <small data-i18n="job.enhance.hamerHint">加载 HaMeR 模型精修手指，需要 GPU，耗时增加</small>
+              </span>
+            </label>
+            <label class="enhance-item">
+              <input type="checkbox" id="flowTorso">
+              <span>
+                <strong data-i18n="job.enhance.torso">躯干动作优化</strong>
+                <small data-i18n="job.enhance.torsoHint">加载 flowhmr_base 改善扭胯等躯干动作</small>
+              </span>
+            </label>
+            <label class="enhance-item">
+              <input type="checkbox" id="flowCrossing">
+              <span>
+                <strong data-i18n="job.enhance.crossing">人物交叉优化</strong>
+                <small data-i18n="job.enhance.crossingHint">多人交叉时用 SAM 2.1 保持人物身份，实验性</small>
+              </span>
+            </label>
+          </div>
+          <p class="hint precision-hint" id="flowEnhanceHint"></p>
+
           <button type="button" class="btn primary block" id="startJob" disabled data-i18n="job.start">开始重建</button>
           <p class="hint" id="engineHint" data-i18n="job.detectingEngine">正在检测引擎状态…</p>
         </section>

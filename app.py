@@ -126,21 +126,32 @@ def _engine_payload() -> dict:
     return status
 
 
-def _check_engine(engine: str) -> None:
+def _check_engine(engine: str, params: dict | None = None) -> None:
     if engine == "instanthmr":
         status = engines.instant_status(CONFIG)
-        if not status["ready"]:
-            missing = []
-            if not status["root_ok"]:
-                missing.append("InstantHMR 目录")
-            if not status["python_ok"]:
-                missing.append("虚拟环境")
-            if not status["deps_ok"]:
-                missing.append("Python 依赖")
-            if not status["selected_model_ok"]:
-                missing.append(f"模型 {status['selected_model']}")
-            if not status["body_ok"]:
-                missing.append("mhr-body.onnx")
+        selected_ok = bool(status["selected_model_ok"])
+        selected_label = str(status["selected_model"])
+        if params and params.get("model"):
+            tier = str(params["model"])
+            fit = int(params.get("fit", status.get("fit") or 0))
+            variant = next((v for v in status.get("variants", [])
+                            if v["tier"] == tier and v["fit"] == fit), None)
+            if variant is None:
+                raise RuntimeError(f"未知的 InstantHMR 模型档位: {tier}")
+            selected_ok = bool(variant["exists"])
+            selected_label = f"{tier} · fit{fit}"
+        missing = []
+        if not status["root_ok"]:
+            missing.append("InstantHMR 目录")
+        if not status["python_ok"]:
+            missing.append("虚拟环境")
+        if not status["deps_ok"]:
+            missing.append("Python 依赖")
+        if not selected_ok:
+            missing.append(f"模型 {selected_label}")
+        if not status["body_ok"]:
+            missing.append("mhr-body.onnx")
+        if missing:
             raise RuntimeError("InstantHMR 未就绪：缺少 " + "、".join(missing)
                                + "。请到「设置与资源」准备。")
     elif engine == "flowhmr":
@@ -159,8 +170,89 @@ def _check_engine(engine: str) -> None:
         if not status.get("job_ready", status["ready"]):
             raise RuntimeError("当前未开启「静态机位」，FlowHMR 需要 VGGT-Omega 相机模型。"
                                "请到设置里下载该模型，或开启静态机位后重试。")
+        if params:
+            labels = {"hamer": "HaMeR 手指精修", "torso": "躯干动作优化",
+                      "crossing": "人物交叉优化"}
+            reasons = {"unsupported": "当前构建不支持", "missing": "模型未下载",
+                       "gpu_required": "需要 GPU"}
+            unavailable = []
+            for key in ("hamer", "torso", "crossing"):
+                flag = params.get("hamer" if key == "hamer" else f"{key}_opt")
+                if not flag:
+                    continue
+                info = (status.get("enhancements") or {}).get(key) or {}
+                if not info.get("available"):
+                    unavailable.append(
+                        f"{labels[key]}（{reasons.get(info.get('reason'), '不可用')}）")
+            if unavailable:
+                raise RuntimeError("FlowHMR 增强项不可用：" + "、".join(unavailable)
+                                   + "。请到「设置与资源」准备。")
     else:
         raise RuntimeError(f"未知引擎: {engine}")
+
+
+def _job_params(engine: str) -> dict:
+    """Per-job parameters: precision/quality choices plus the shared limits."""
+    params = {
+        "max_frames": int(request.args.get("max_frames", CONFIG["job"]["max_frames"]) or 0),
+        "auto_frames": str(request.args.get("auto_frames", "0")).lower() in ("1", "true", "on"),
+        "device": CONFIG["engines"][engine].get("device"),
+    }
+    if engine == "instanthmr":
+        tier = (request.args.get("model") or "").strip()
+        if tier:
+            if tier not in engines.INSTANT_TIERS:
+                raise ValueError(f"未知的 InstantHMR 模型档位: {tier}")
+            params["model"] = tier
+        fit_raw = request.args.get("fit")
+        if fit_raw not in (None, ""):
+            try:
+                fit = int(fit_raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"InstantHMR 拟合档位无效: {fit_raw}")
+            if fit not in (0, 1, 2):
+                raise ValueError("InstantHMR 拟合档位须为 0、1 或 2")
+            params["fit"] = fit
+        inst = CONFIG["engines"]["instanthmr"]
+        params["pose_filter"] = inst.get("pose_filter", "one-euro")
+        params["focal"] = inst.get("focal")
+    else:
+        eng = CONFIG["engines"]["flowhmr"]
+        steps_raw = request.args.get("steps")
+        if steps_raw not in (None, ""):
+            try:
+                steps = int(steps_raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"FlowHMR 步数无效: {steps_raw}")
+            if not 1 <= steps <= 100:
+                raise ValueError("FlowHMR 步数须在 1–100 之间")
+            params["steps"] = steps
+        else:
+            params["steps"] = max(1, min(100, int(eng.get("steps") or 20)))
+
+        def flag(name: str) -> bool:
+            return str(request.args.get(name, "0")).lower() in ("1", "true", "on", "yes")
+
+        enhance = {
+            "hamer": flag("hamer"),
+            "torso_opt": flag("torso_opt"),
+            "crossing_opt": flag("crossing_opt"),
+        }
+        if any(enhance.values()) and engines.flow_layout(Path(eng["root"]))["kind"] != "windows":
+            raise ValueError("当前 FlowHMR 构建不支持模型增强选项（需要 Windows 便携版）")
+        # Only version-agnostic fields plus the optional Windows enhancements:
+        # each FlowHMR build fills the rest from its own defaults.
+        params.update({
+            "manual_select": bool(eng.get("manual_select")),
+            "static_camera": bool(eng.get("static_camera")),
+            **enhance,
+        })
+        if params["auto_frames"] or params["max_frames"] <= 0:
+            params["auto_frames"] = True
+            params["max_frames"] = 900
+        else:
+            params["max_frames"] = max(30, min(10000, params["max_frames"]))
+    return params
 
 
 # --------------------------------------------------------------------------- pages
@@ -258,11 +350,17 @@ def api_jobs():
 @app.route("/api/jobs", methods=["POST", "PUT"])
 def api_create_job():
     engine = request.args.get("engine", "instanthmr")
+    if engine not in ("instanthmr", "flowhmr"):
+        return jsonify(error=f"未知引擎: {engine}"), 400
     filename = Path(request.args.get("filename") or "video.mp4").name
     if Path(filename).suffix.lower() not in VIDEO_EXTS:
         return jsonify(error=f"不支持的视频格式: {Path(filename).suffix or '(无扩展名)'}"), 400
     try:
-        _check_engine(engine)
+        params = _job_params(engine)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    try:
+        _check_engine(engine, params)
     except RuntimeError as exc:
         return jsonify(error=str(exc), code="engine_not_ready"), 409
 
@@ -283,27 +381,6 @@ def api_create_job():
                 out.write(chunk)
         if size == 0:
             raise RuntimeError("上传的文件为空")
-        params = {
-            "max_frames": int(request.args.get("max_frames", CONFIG["job"]["max_frames"]) or 0),
-            "auto_frames": str(request.args.get("auto_frames", "0")).lower() in ("1", "true", "on"),
-            "device": CONFIG["engines"]["instanthmr" if engine == "instanthmr" else "flowhmr"].get("device"),
-        }
-        if engine == "instanthmr":
-            params["pose_filter"] = CONFIG["engines"]["instanthmr"].get("pose_filter", "one-euro")
-            params["focal"] = CONFIG["engines"]["instanthmr"].get("focal")
-        else:
-            eng = CONFIG["engines"]["flowhmr"]
-            # Only version-agnostic fields: each FlowHMR build fills the rest
-            # from its own defaults (Windows portable and upstream differ).
-            params.update({
-                "manual_select": bool(eng.get("manual_select")),
-                "static_camera": bool(eng.get("static_camera")),
-            })
-            if params["auto_frames"] or params["max_frames"] <= 0:
-                params["auto_frames"] = True
-                params["max_frames"] = 900
-            else:
-                params["max_frames"] = max(30, min(10000, params["max_frames"]))
         job = JOBS.submit(engine, filename, temp, params)
         return jsonify(job=job)
     except RuntimeError as exc:

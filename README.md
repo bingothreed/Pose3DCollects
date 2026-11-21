@@ -89,7 +89,11 @@ The service starts automatically when you submit your first FlowHMR job; the fir
 ## Workflow
 
 1. Select an engine in the top-right corner.
-2. Drag a video into the right panel and set the max frames (`0` = all; long videos take longer).
+2. Drag a video into the right panel and set the max frames (`0` = all; long videos take longer) plus this task's precision:
+   - InstantHMR: model tier (Nano → Medium, more accurate as you go) and fit mode (network only / 1 crop / 2 crops).
+   - FlowHMR: generation quality (Fast 10 steps / Balanced 20 / Fine 40); more steps refine motion at a higher cost.
+     Optional model enhancements (Windows portable build, when the model is downloaded): HaMeR finger refinement (GPU required), torso motion optimization (`flowhmr_base`), and crossing-person optimization (SAM 2.1). They load extra models and take longer.
+   If the selected model is not downloaded, the start button stays disabled and points you to Settings.
 3. Click **Start Reconstruction**.
 4. The **Reference Video** page shows progress; for multi-person videos with **Pause for selection on multiple people** enabled, person thumbnails appear for selection.
 5. When done, click **View 3D Result** to play the mesh animation on the **3D Rendering** page.

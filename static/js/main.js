@@ -59,6 +59,7 @@ let pollTimer = 0;
 let engineTimer = 0;
 let jobsTimer = 0;
 let lastViewerMeta = null;
+let precisionInitialized = false;
 
 const PREF_SYNC = "p3d.syncVideo";
 const PREF_AUDIO = "p3d.audio";
@@ -84,6 +85,7 @@ async function init() {
   bindTheme();
   bindLanguage();
   bindEnginePicker();
+  bindPrecisionControls();
   bindFileInput();
   bindStart();
   bindJobActions();
@@ -98,6 +100,7 @@ async function init() {
   });
   on("config", (config) => {
     state.config = config;
+    initPrecisionDefaults();
   });
 
   try {
@@ -109,6 +112,7 @@ async function init() {
     populateForms();
     updateEngineStatus(engines);
     $("#maxFrames").value = config.job?.max_frames ?? 300;
+    initPrecisionDefaults();
     const query = new URLSearchParams(window.location.search);
     const themeParam = query.get("theme");
     if (themeParam === "light" || themeParam === "dark") applyTheme(themeParam, true);
@@ -267,7 +271,119 @@ function updateEngineUI() {
     text.textContent = t("engine.needsSetup", { engine: ENGINE_LABEL[state.engine] });
   }
   updateEngineHint();
+  updatePrecisionUI();
   updateStartState();
+}
+
+/* ------------------------------------------------------------- precision */
+const ENHANCERS = [
+  { key: "hamer", id: "flowHamer", label: "job.enhance.hamer" },
+  { key: "torso", id: "flowTorso", label: "job.enhance.torso" },
+  { key: "crossing", id: "flowCrossing", label: "job.enhance.crossing" },
+];
+const ENHANCE_REASONS = {
+  missing: "job.enhance.reason.missing",
+  unsupported: "job.enhance.reason.unsupported",
+  gpu_required: "job.enhance.reason.gpu",
+};
+
+function bindPrecisionControls() {
+  for (const id of ["instantTierJob", "instantFitJob", "flowStepsJob"]) {
+    $(`#${id}`)?.addEventListener("change", updatePrecisionUI);
+  }
+}
+
+function initPrecisionDefaults() {
+  if (precisionInitialized || !state.config) return;
+  const inst = state.config.engines?.instanthmr || {};
+  const tierEl = $("#instantTierJob");
+  const fitEl = $("#instantFitJob");
+  if (tierEl) tierEl.value = inst.model || "medium";
+  if (fitEl) fitEl.value = String(inst.fit ?? 2);
+  setFlowStepsValue(Number(state.config.engines?.flowhmr?.steps) || 20);
+  precisionInitialized = true;
+}
+
+function setFlowStepsValue(steps) {
+  const select = $("#flowStepsJob");
+  if (!select) return;
+  const value = String(steps);
+  if (!Array.from(select.options).some((option) => option.value === value)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = t("job.precision.custom", { steps });
+    select.appendChild(option);
+  }
+  select.value = value;
+}
+
+function selectedInstantVariant() {
+  const status = state.engines?.instanthmr;
+  const tier = $("#instantTierJob")?.value;
+  const fit = Number($("#instantFitJob")?.value ?? 0);
+  return (status?.variants || []).find((v) => v.tier === tier && v.fit === fit) || null;
+}
+
+function updatePrecisionUI() {
+  const instant = state.engine === "instanthmr";
+  show($("#instantPrecisionFields"), instant);
+  show($("#instantPrecisionHint"), instant);
+  show($("#flowPrecisionFields"), !instant);
+  const hint = $("#instantPrecisionHint");
+  if (instant && hint) {
+    const variant = selectedInstantVariant();
+    hint.textContent = variant
+      ? t(variant.exists ? "job.precision.ready" : "job.precision.missing", { file: variant.file })
+      : "";
+    hint.className = `hint precision-hint${variant && !variant.exists ? " warn" : ""}`;
+  }
+  updateEnhanceUI();
+  updateStartState();
+}
+
+function updateEnhanceUI() {
+  const isFlow = state.engine === "flowhmr";
+  const status = state.engines?.flowhmr;
+  const supported = isFlow && status?.layout === "windows";
+  show($("#flowEnhanceFields"), supported);
+  show($("#flowEnhanceHint"), supported);
+  if (!isFlow || !status) return;
+  if (status.layout !== "windows") {
+    for (const item of ENHANCERS) {
+      const input = $(`#${item.id}`);
+      if (input) {
+        input.checked = false;
+        input.disabled = true;
+      }
+    }
+    return;
+  }
+  const enhancements = status.enhancements || {};
+  const unavailable = [];
+  for (const item of ENHANCERS) {
+    const input = $(`#${item.id}`);
+    if (!input) continue;
+    const info = enhancements[item.key] || { available: false, reason: "unsupported" };
+    input.disabled = !info.available;
+    input.closest(".enhance-item")?.classList.toggle("unavailable", !info.available);
+    if (info.available) {
+      input.title = "";
+    } else {
+      input.checked = false;
+      const reason = t(ENHANCE_REASONS[info.reason] || "job.enhance.reason.missing");
+      input.title = reason;
+      const label = t(item.label);
+      unavailable.push(getLang() === "zh" ? `${label}（${reason}）` : `${label} (${reason})`);
+    }
+  }
+  const hint = $("#flowEnhanceHint");
+  if (hint) {
+    const joiner = getLang() === "zh" ? "、" : ", ";
+    hint.textContent = unavailable.length
+      ? t("job.enhance.unavailable", { items: unavailable.join(joiner) })
+      : "";
+    hint.className = `hint precision-hint${unavailable.length ? " warn" : ""}`;
+  }
 }
 
 function updateEngineHint() {
@@ -325,7 +441,9 @@ function updateStartState() {
   const button = $("#startJob");
   const status = state.engines?.[state.engine];
   const ready = Boolean(status?.job_ready ?? status?.ready);
-  button.disabled = uploading || !state.selectedFile || !ready;
+  const variant = state.engine === "instanthmr" ? selectedInstantVariant() : null;
+  const precisionReady = !variant || variant.exists;
+  button.disabled = uploading || !state.selectedFile || !ready || !precisionReady;
   button.textContent = uploading ? t("job.uploadingButton") : t("job.start");
 }
 
@@ -391,6 +509,14 @@ async function startJob() {
   const engine = state.engine;
   const file = state.selectedFile;
   const maxFrames = Number($("#maxFrames").value) || 0;
+  const precision = engine === "instanthmr"
+    ? { model: $("#instantTierJob").value, fit: Number($("#instantFitJob").value) }
+    : {
+        steps: Number($("#flowStepsJob").value),
+        hamer: $("#flowHamer").checked,
+        torsoOpt: $("#flowTorso").checked,
+        crossing: $("#flowCrossing").checked,
+      };
   uploading = true;
   show($("#uploadProgress"), true);
   $("#uploadFill").style.width = "0%";
@@ -407,7 +533,7 @@ async function startJob() {
   $("#jobStatusPill").className = "pill running";
   try {
     const job = await api.uploadJob({
-      engine, file, maxFrames, autoFrames: maxFrames === 0,
+      engine, file, maxFrames, autoFrames: maxFrames === 0, ...precision,
       onProgress: (ratio) => {
         const pct = Math.round(ratio * 100);
         $("#uploadFill").style.width = `${pct}%`;
