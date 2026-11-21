@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pose3D Collects</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script>
+  try {
+    const theme = localStorage.getItem("p3d.theme") || "dark";
+    document.documentElement.dataset.theme = theme;
+  } catch (_) {}
+</script>
+<script type="importmap">
+  { "imports": {
+      "three": "/static/vendor/three/three.module.min.js",
+      "three/addons/controls/OrbitControls.js": "/static/vendor/three/OrbitControls.js"
+  } }
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </div>
+    <div class="brand-text">
+      <h1>Pose3D <em>Collects</em></h1>
+      <p data-i18n="app.subtitle">人体动作重建工作台</p>
+    </div>
+  </div>
+
+  <div class="engine-picker" id="enginePicker" role="group" aria-label="选择引擎" data-i18n-aria="engine.choose">
+    <button type="button" class="engine-btn active" data-engine="instanthmr">
+      <span class="engine-dot"></span>
+      <span class="engine-name">InstantHMR</span>
+      <small data-i18n="engine.picker.instant">实时 · ONNX</small>
+    </button>
+    <button type="button" class="engine-btn" data-engine="flowhmr">
+      <span class="engine-dot"></span>
+      <span class="engine-name">FlowHMR</span>
+      <small data-i18n="engine.picker.flow">视频动捕 · 3D</small>
+    </button>
+  </div>
+
+  <div class="topbar-actions">
+    <button type="button" class="health-pill" id="engineHealth" title="引擎状态" data-i18n-title="engine.statusTitle">
+      <span class="health-dot"></span><span id="engineHealthText" data-i18n="engine.detecting">检测中…</span>
+    </button>
+    <button type="button" class="lang-btn" id="langToggle" title="Switch language">EN</button>
+    <button type="button" class="icon-btn" id="themeToggle" title="切换主题" aria-label="切换主题" data-i18n-title="theme.toggle" data-i18n-aria="theme.toggle">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg>
+    </button>
+  </div>
+</header>
+
+<nav class="tabbar" role="tablist">
+  <button type="button" class="tab-btn active" data-tab="video" role="tab">
+    <span class="tab-num">01</span> <span data-i18n="tab.video">参考视频</span>
+  </button>
+  <button type="button" class="tab-btn" data-tab="viewer" role="tab">
+    <span class="tab-num">02</span> <span data-i18n="tab.viewer">3D 渲染</span>
+    <span class="tab-badge hidden" id="viewerBadge"></span>
+  </button>
+  <button type="button" class="tab-btn" data-tab="settings" role="tab">
+    <span class="tab-num">03</span> <span data-i18n="tab.settings">设置与资源</span>
+  </button>
+  <span class="tab-spacer"></span>
+  <span class="current-job-chip hidden" id="currentJobChip"></span>
+</nav>
+
+<main class="app-main">
+
+  <!-- ============================================================ 01 video -->
+  <section class="tab-panel active" id="tab-video" role="tabpanel">
+    <div class="video-layout">
+      <section class="card stage-card">
+        <div class="card-head">
+          <div>
+            <h2 id="videoTitle" data-i18n="video.title">参考视频</h2>
+            <p id="videoSubtitle" data-i18n="video.subtitle">上传视频后在这里预览，并检查人物框与 2D 关键点</p>
+          </div>
+          <div class="head-actions">
+            <span class="pill hidden" id="jobStatusPill"></span>
+            <button type="button" class="btn ghost hidden" id="openResultBtn" data-i18n="video.viewResult">查看 3D 结果</button>
+          </div>
+        </div>
+
+        <div class="video-stage" id="videoStage">
+          <div class="empty-state" id="videoEmpty">
+            <div class="empty-icon play" aria-hidden="true"></div>
+            <h3 data-i18n="video.empty.title">还没有视频</h3>
+            <p data-i18n="video.empty.body">在右侧拖入一个视频，或直接点击选择文件。</p>
+            <button type="button" class="btn primary" id="emptyChoose" data-i18n="video.choose">选择视频</button>
+          </div>
+          <div class="video-wrap hidden" id="videoWrap">
+            <video id="video" controls playsinline preload="auto"></video>
+            <canvas id="videoOverlay"></canvas>
+          </div>
+        </div>
+
+        <div class="overlay-legend hidden" id="overlayLegend">
+          <span><i class="legend-dot box"></i><span data-i18n="video.legend.box">人物框</span></span>
+          <span id="legendSkeleton"><i class="legend-dot keypoint"></i><span data-i18n="video.legend.keypoints">2D 关键点</span></span>
+          <span class="legend-note" id="overlayNote"></span>
+        </div>
+
+        <div class="job-progress hidden" id="jobProgress">
+          <div class="progress-head">
+            <span id="progressStage" data-i18n="job.stage.prepare">准备</span>
+            <span id="progressPct">0%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+          <p class="progress-message" id="progressMessage"></p>
+          <div class="stage-list" id="stageList"></div>
+          <div class="progress-actions">
+            <button type="button" class="btn ghost danger" id="cancelJob" data-i18n="video.cancel">取消任务</button>
+            <button type="button" class="btn ghost" id="openResultBtnInline" data-i18n="video.viewResult">查看 3D 结果</button>
+          </div>
+          <details class="log-details" id="jobLogDetails">
+            <summary data-i18n="video.jobLog">任务日志</summary>
+            <pre id="jobLog"></pre>
+          </details>
+        </div>
+      </section>
+
+      <aside class="side-column">
+        <section class="card control-card">
+          <div class="card-head">
+            <h2 data-i18n="job.new">新建任务</h2>
+            <span class="chip" id="engineChip">InstantHMR</span>
+          </div>
+
+          <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择视频"
+            data-i18n-aria="video.choose">
+            <input type="file" id="fileInput" accept="video/*,.mkv,.avi,.m4v" hidden>
+            <div class="dz-icon" aria-hidden="true">＋</div>
+            <p data-i18n-html="job.dropTitle"><strong>拖入视频</strong> 或点击选择</p>
+            <span class="dz-hint" id="fileHint" data-i18n="job.fileHint">MP4 / MOV / MKV / AVI / WebM</span>
+          </div>
+
+          <div class="file-row hidden" id="fileRow">
+            <div class="file-meta">
+              <strong id="fileName"></strong>
+              <span id="fileSize"></span>
+            </div>
+            <button type="button" class="link-btn" id="fileRemove" data-i18n="job.remove">移除</button>
+          </div>
+          <div class="upload-progress hidden" id="uploadProgress"><div id="uploadFill"></div></div>
+
+          <div class="field-grid compact">
+            <label class="field">
+              <span data-i18n="job.maxFrames">最大帧数</span>
+              <input type="number" id="maxFrames" min="0" max="10000" step="30" value="300">
+              <small data-i18n="job.maxFramesHint">0 = 全部（长视频耗时更久）</small>
+            </label>
+          </div>
+
+          <button type="button" class="btn primary block" id="startJob" disabled data-i18n="job.start">开始重建</button>
+          <p class="hint" id="engineHint" data-i18n="job.detectingEngine">正在检测引擎状态…</p>
+        </section>
+
+        <section class="card person-card hidden" id="personCard">
+          <div class="card-head">
+            <h2 data-i18n="person.title">选择人物</h2>
+            <span class="chip amber" data-i18n="person.multi">检测到多人</span>
+          </div>
+          <p class="hint" data-i18n="person.hint">点击目标人物的缩略图，再确认。10 分钟未选择会自动使用推荐人物。</p>
+          <div class="person-grid" id="personGrid"></div>
+          <button type="button" class="btn primary block" id="confirmPerson" disabled data-i18n="person.confirm">确认人物</button>
+        </section>
+
+        <section class="card history-card">
+          <div class="card-head">
+            <h2 data-i18n="history.title">最近任务</h2>
+            <button type="button" class="link-btn" id="refreshJobs" data-i18n="history.refresh">刷新</button>
+          </div>
+          <div class="job-list" id="jobList">
+            <p class="muted small" data-i18n="history.empty">暂无任务</p>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ============================================================ 02 viewer -->
+  <section class="tab-panel" id="tab-viewer" role="tabpanel">
+    <section class="card viewer-card">
+      <div class="card-head viewer-head">
+        <div>
+          <h2 data-i18n="viewer.title">3D 渲染</h2>
+          <p id="viewerSubtitle" data-i18n="viewer.subtitle">完成重建后可播放、旋转、缩放人体网格序列</p>
+        </div>
+        <div class="head-actions">
+          <span class="chip" id="viewerMetaChip">—</span>
+          <button type="button" class="btn ghost" id="wireframeBtn" disabled data-i18n="viewer.wireframe">线框</button>
+          <button type="button" class="btn ghost" id="resetViewBtn" disabled data-i18n="viewer.reset">重置视角</button>
+          <a class="btn ghost disabled" id="downloadNpz" href="#" download data-i18n="viewer.download">下载 NPZ</a>
+        </div>
+      </div>
+
+      <div class="viewer-stage" id="viewerStage">
+        <div class="empty-state" id="viewerEmpty">
+          <div class="empty-icon cube" aria-hidden="true"></div>
+          <h3 data-i18n="viewer.empty.title">等待 3D 结果</h3>
+          <p data-i18n="viewer.empty.body">在「参考视频」里完成一次重建，这里就会显示网格动画。</p>
+          <button type="button" class="btn primary" id="goVideoTab" data-i18n="viewer.goUpload">去上传视频</button>
+        </div>
+        <div class="three-container hidden" id="threeContainer"></div>
+        <div class="sync-video hidden" id="syncVideoWrap">
+          <video id="syncVideo" muted loop playsinline preload="auto"></video>
+        </div>
+        <div class="viewer-stats hidden" id="viewerStats"></div>
+        <div class="viewer-loading hidden" id="viewerLoading"><span class="spinner"></span><span data-i18n="viewer.loading">加载 3D 数据…</span></div>
+      </div>
+
+      <div class="playbar hidden" id="playbar">
+        <button type="button" class="play-btn" id="playBtn" aria-label="播放/暂停" data-i18n-aria="viewer.play">▶</button>
+        <input type="range" id="frameSlider" min="0" max="0" value="0" step="1">
+        <span class="time-label" id="timeLabel">0.00s / 0.00s</span>
+        <select id="speedSelect" aria-label="播放速度" data-i18n-aria="viewer.speed">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2×</option>
+        </select>
+        <span class="fps-label" id="fpsLabel">—</span>
+        <div class="playbar-options">
+          <button type="button" class="toggle-btn" id="syncVideoBtn" aria-pressed="false"
+            aria-label="同步视频" data-i18n-aria="viewer.syncVideo" data-i18n-title="viewer.syncVideoTitle">
+            <i class="toggle-dot" aria-hidden="true"></i><span data-i18n="viewer.syncVideo">同步视频</span>
+          </button>
+          <button type="button" class="toggle-btn" id="audioBtn" aria-pressed="false" disabled
+            aria-label="音频" data-i18n-aria="viewer.audio" data-i18n-title="viewer.audioTitle">
+            <i class="toggle-dot" aria-hidden="true"></i><span data-i18n="viewer.audio">音频</span>
+          </button>
+          <button type="button" class="toggle-btn" id="lockViewBtn" aria-pressed="false"
+            aria-label="固定视角" data-i18n-aria="viewer.fixedView" data-i18n-title="viewer.fixedViewTitle">
+            <i class="toggle-dot" aria-hidden="true"></i><span data-i18n="viewer.fixedView">固定视角</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ============================================================ 03 settings -->
+  <section class="tab-panel" id="tab-settings" role="tabpanel">
+    <div class="settings-grid">
+
+      <div class="settings-context" id="settingsContext" data-engine="instanthmr">
+        <span class="settings-context-dot"></span>
+        <span id="settingsContextText">当前显示 <strong>InstantHMR</strong> 的配置</span>
+        <span class="settings-context-hint" data-i18n="settings.contextHint">切换顶栏引擎可查看另一个引擎的资源</span>
+      </div>
+
+      <section class="card settings-card" id="instantCard">
+        <div class="card-head">
+          <div>
+            <h2>InstantHMR</h2>
+            <p data-i18n="settings.instant.subtitle">ONNX 推理 · 独立虚拟环境</p>
+          </div>
+          <div class="head-actions">
+            <span class="chip" id="instantReadyChip" data-i18n="engine.detecting">检测中…</span>
+          </div>
+        </div>
+        <div class="status-rows" id="instantChecks"></div>
+        <div class="model-location">
+          <div class="model-location-main">
+            <span class="model-location-label" data-i18n="settings.location.instant">模型放置位置</span>
+            <code class="model-location-path" id="instantModelsPath">—</code>
+          </div>
+          <div class="model-location-actions">
+            <button type="button" class="btn ghost" id="copyInstantModels" data-i18n="settings.copyPath">复制路径</button>
+            <button type="button" class="btn ghost" id="instantOpenModels" data-i18n="settings.openFolder">打开文件夹</button>
+          </div>
+        </div>
+        <p class="model-location-note" data-i18n-html="settings.instant.locationNote">手动下载的模型放到这个目录，文件名需与下表一致（当前拟合方式见文件名）；另外需要 <code>mhr-body.onnx</code>。可从 <a href="https://huggingface.co/momolesang/InstantHMR/tree/main" target="_blank" rel="noreferrer">Hugging Face 模型页</a> 下载。</p>
+        <div class="model-table" id="instantModels"></div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="instantModelsDir" placeholder="InstantHMR/models"></label>
+          <label class="field"><span data-i18n="settings.basePython">基础 Python</span><input type="text" id="instantBasePython" placeholder="python 或 py -3.12" data-i18n-placeholder="settings.basePythonPlaceholder"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.defaultModel">默认模型</span>
+            <select id="instantModelSelect">
+              <option value="nano" data-i18n="tier.nano">Nano · 最快</option>
+              <option value="tiny" data-i18n="tier.tiny">Tiny · 轻量</option>
+              <option value="small" data-i18n="tier.small">Small · 均衡</option>
+              <option value="medium" data-i18n="tier.medium">Medium · 最准</option>
+              <option value="medium-commercial" data-i18n="tier.medium-commercial">Medium Commercial · 可商用</option>
+            </select>
+          </label>
+          <label class="field"><span data-i18n="settings.fit">拟合</span>
+            <select id="instantFit">
+              <option value="0" data-i18n="settings.fit.network">网络直出</option>
+              <option value="1" data-i18n="settings.fit.one">Fit · 1 crop</option>
+              <option value="2" data-i18n="settings.fit.two">Fit · 2 crops</option>
+            </select>
+          </label>
+          <label class="field"><span data-i18n="settings.device">设备</span>
+            <select id="instantDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cuda" data-i18n="settings.cuda">CUDA</option><option value="cpu" data-i18n="settings.cpu">CPU</option></select>
+          </label>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn primary" id="instantSaveBtn" data-i18n="settings.saveInstant">保存设置</button>
+          <button type="button" class="btn" id="instantEnvBtn" data-i18n="settings.env"
+            data-i18n-title="settings.envTitle">自动配置环境</button>
+        </div>
+        <p class="hint" data-i18n="settings.instant.hint">首次使用：先「自动配置环境」，再在模型表里点下载；也可以按上面的位置手动放置模型。</p>
+      </section>
+
+      <section class="card settings-card" id="flowCard">
+        <div class="card-head">
+          <div>
+            <h2>FlowHMR</h2>
+            <p data-i18n="settings.flow.subtitle">视频动捕 · 复用 FlowHMR 自带 Web 服务</p>
+          </div>
+          <div class="head-actions">
+            <span class="chip" id="flowReadyChip" data-i18n="engine.detecting">检测中…</span>
+            <span class="chip service" id="flowServiceChip" data-i18n="settings.serviceStopped">服务未启动</span>
+          </div>
+        </div>
+        <div class="status-rows" id="flowChecks"></div>
+        <div class="model-location">
+          <div class="model-location-main">
+            <span class="model-location-label" data-i18n="settings.location.flow">模型根目录</span>
+            <code class="model-location-path" id="flowModelsPath">—</code>
+          </div>
+          <div class="model-location-actions">
+            <button type="button" class="btn ghost" id="copyFlowModels" data-i18n="settings.copyPath">复制路径</button>
+            <button type="button" class="btn ghost" id="flowOpenModels" data-i18n="settings.openFolder">打开文件夹</button>
+          </div>
+        </div>
+        <p class="model-location-note" data-i18n="settings.flow.locationNote">每个模型的完整目标位置见下表；点行尾的「打开目录」可直接打开或创建对应文件夹。公开模型可以使用上面的「下载公开模型」自动获取。</p>
+        <div class="model-table" id="flowModels"></div>
+        <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="flowRoot" placeholder="FlowHMR 根目录" data-i18n-placeholder="settings.flowRootPlaceholder"></label>
+          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="flowPython" placeholder="runtime\python.exe"></label>
+          <label class="field narrow"><span data-i18n="settings.port">端口</span><input type="number" id="flowPort" min="1024" max="65535"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.basePythonNoRuntime">基础 Python（无内置环境时）</span><input type="text" id="flowBasePython" placeholder="python"></label>
+          <label class="field"><span data-i18n="settings.device">设备</span>
+            <select id="flowDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cuda" data-i18n="settings.cuda">CUDA</option><option value="cpu" data-i18n="settings.cpu">CPU</option></select>
+          </label>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn primary" id="flowSaveBtn" data-i18n="settings.saveFlow">保存并检测</button>
+          <button type="button" class="btn" id="flowServiceBtn">启动服务</button>
+          <button type="button" class="btn" id="flowEnvBtn" data-i18n="settings.env"
+            data-i18n-title="settings.envTitle">自动配置环境</button>
+          <button type="button" class="btn" id="flowDownloadBtn" data-i18n="settings.downloadPublic">下载公开模型</button>
+          <button type="button" class="btn ghost" id="flowOpenRoot" data-i18n="settings.openProject">打开项目目录</button>
+        </div>
+        <p class="hint" id="flowHint">FlowHMR 服务在后台运行；首次启动需要加载模型，可能需要几分钟。</p>
+      </section>
+
+      <section class="card settings-card compact-card">
+        <div class="card-head"><h2 data-i18n="settings.defaults.title">任务默认值</h2></div>
+        <div class="field-grid">
+          <label class="field"><span data-i18n="settings.defaults.maxFrames">默认最大帧数</span><input type="number" id="defaultMaxFrames" min="0" max="10000" step="30"></label>
+          <label class="field" id="poseFilterField"><span data-i18n="settings.smoothing">InstantHMR 平滑</span>
+            <select id="poseFilter">
+              <option value="one-euro" data-i18n="settings.smoothing.oneEuro">One-Euro（推荐）</option>
+              <option value="alpha-beta" data-i18n="settings.smoothing.alphaBeta">Alpha-Beta</option>
+              <option value="none" data-i18n="settings.smoothing.off">关闭</option>
+            </select>
+          </label>
+          <label class="field" id="flowManualField"><span data-i18n="settings.personSelect">FlowHMR 人物选择</span>
+            <select id="flowManualSelect">
+              <option value="false" data-i18n="settings.personSelect.auto">自动选择</option>
+              <option value="true" data-i18n="settings.personSelect.manual">多人时暂停让我选</option>
+            </select>
+            <small id="flowManualNote"></small>
+          </label>
+          <label class="field" id="flowStaticField"><span data-i18n="settings.camera">FlowHMR 相机</span>
+            <select id="flowStaticCamera">
+              <option value="false" data-i18n="settings.camera.motion">估计相机运动</option>
+              <option value="true" data-i18n="settings.camera.static">静态机位（更快）</option>
+            </select>
+          </label>
+          <label class="field wide"><span data-i18n="settings.ffmpeg">FFmpeg 路径（可选）</span><input type="text" id="ffmpegPath" placeholder="留空自动检测" data-i18n-placeholder="settings.ffmpeg.placeholder"></label>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn primary" id="saveDefaultsBtn" data-i18n="settings.saveDefaults">保存默认值</button>
+          <button type="button" class="btn ghost" id="openLogsBtn" data-i18n="settings.logLocation">日志位置</button>
+        </div>
+      </section>
+
+      <section class="card settings-card setup-log-card hidden" id="setupLogCard">
+        <div class="card-head">
+          <div>
+            <h2 id="setupLogTitle">安装日志</h2>
+            <p id="setupLogSubtitle" data-i18n="settings.setupLog.live">实时输出</p>
+          </div>
+          <div class="head-actions">
+            <span class="chip" id="setupLogStatus">运行中</span>
+            <button type="button" class="btn ghost danger" id="stopSetupBtn" data-i18n="settings.stop">停止</button>
+            <button type="button" class="link-btn" id="closeSetupLog" data-i18n="settings.hide">收起</button>
+          </div>
+        </div>
+        <pre class="setup-log" id="setupLog"></pre>
+      </section>
+    </div>
+  </section>
+
+</main>
+
+<div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+data/config.json
+data/jobs/
+data/logs/
+data/tmp/
+data/state/
+data/webview/
+*.log

@@ -1,0 +1,3 @@
+# Optional native window shell (WebView2 / EdgeChromium). Falls back to an
+# Edge/Chrome --app window when unavailable.
+pywebview>=5.0
