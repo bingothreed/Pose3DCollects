@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import uuid
@@ -522,7 +523,9 @@ def tdpt_status(cfg: dict) -> dict:
         "model_ok": model_info["exists"],
         "ready": ready,
         "env_kind": "venv" if python_ok else ("project" if root_ok else "missing"),
-        "can_create_env": root_ok,
+        # The env setup task copies the source templates from this repo and
+        # creates the directory, so it works even on a fresh machine.
+        "can_create_env": True,
         "can_download_models": python_ok,
         "setup_running": None,
     }
@@ -830,11 +833,17 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
 
     if engine == "tdpt":
         root = Path(cfg["engines"]["tdpt"]["root"])
-        if not root.is_dir():
-            raise RuntimeError(f"TDPT 目录不存在: {root}")
+        templates = cfgmod.BASE_DIR / "engines" / "tdpt"
         mirror = "https://mirrors.aliyun.com/pypi/simple/"
 
         def runner(task: SetupTask):
+            root.mkdir(parents=True, exist_ok=True)
+            task.log(f"写入引擎源码模板（{templates}）…")
+            for name in ("tdpt_vnect.py", "demo.py", "requirements.txt"):
+                src = templates / name
+                if not src.is_file():
+                    raise RuntimeError(f"缺少 TDPT 源码模板: {src}")
+                shutil.copyfile(src, root / name)
             venv_python = _ensure_venv(task, root, cfg["engines"]["tdpt"].get("base_python", "python"))
             task.log("升级 pip…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
