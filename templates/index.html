@@ -220,7 +220,7 @@
           </div>
 
           <div class="hidden" id="tdptPrecisionFields">
-            <p class="hint precision-hint" data-i18n="job.precision.tdptHint">VNect 单帧 3D 骨架（24+4 关节）· CPU 极速；垂直翻转与平滑在「设置与资源」里配置。</p>
+            <p class="hint precision-hint" data-i18n="job.precision.tdptHint">VNect 3D 骨架（24+4 关节）· 单帧 224（快速）/ 三帧 448（高精度）模型任选其一；后处理、帧窗口与垂直翻转在「设置与资源」里配置。</p>
             <label class="enhance-item">
               <input type="checkbox" id="tdptSmoothJob" checked>
               <span>
@@ -503,7 +503,7 @@
             <button type="button" class="btn ghost" id="tdptOpenModels" data-i18n="settings.openFolder">打开文件夹</button>
           </div>
         </div>
-        <p class="model-location-note" data-i18n="settings.tdpt.locationNote">模型目标位置见下表：单帧 224 模型来自 digital-standard/ThreeDPoseTracker 公共仓库（可用「自动下载模型」获取，约 33 MB）；3 帧 448 模型来自 ThreeDPoseLibrary，需要放到模型目录（不会自动下载）。</p>
+        <p class="model-location-note" data-i18n="settings.tdpt.locationNote">两个模型任选其一即可（高精度 / 快速）。单帧 224 模型来自 digital-standard/ThreeDPoseTracker 公共仓库（可用「下载单帧公开模型」获取，约 33 MB）；3 帧 448 模型来自 ThreeDPoseLibrary，需要手动放入模型目录（不会自动下载）。</p>
         <div class="model-table" id="tdptModels"></div>
         <div class="inline-form">
           <label class="field wide"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="tdptModelsDir" placeholder="engines/tdpt/models"></label>
@@ -511,12 +511,12 @@
           <p class="hint wide">TDPT 已内置：脚本、模型和独立虚拟环境均位于 <code>engines/tdpt</code>。</p>
         </div>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.tdpt.model">模型（帧窗口）</span>
+          <label class="field wide"><span data-i18n="settings.tdpt.model">模型（精度）</span>
             <select id="tdptModel">
-              <option value="ThreeDPoseTracker_3frames.onnx" data-i18n="settings.tdpt.model3">3 帧 · 448（ThreeDPoseLibrary）</option>
-              <option value="MobileNet3D3_6.onnx" data-i18n="settings.tdpt.model1">单帧 · 224（公共模型）</option>
+              <option value="ThreeDPoseTracker_3frames.onnx" data-i18n="settings.tdpt.model3">3 帧 · 448 · 高精度（ThreeDPoseLibrary）</option>
+              <option value="MobileNet3D3_6.onnx" data-i18n="settings.tdpt.model1">单帧 · 224 · 快速（公共模型）</option>
             </select>
-            <small data-i18n="settings.tdpt.modelHint">3 帧模型使用连续三帧滑动窗口，时序更稳；单帧模型推理更快。</small>
+            <small data-i18n="settings.tdpt.modelHint">两个模型任选其一：3 帧 448 精度更高、时序更稳；单帧 224 推理更快。所选模型缺失时会自动使用另一个可用模型。</small>
           </label>
           <label class="field"><span data-i18n="settings.tdpt.smoothing">后处理滤波（Kalman + 低通 + 1€）</span>
             <select id="tdptSmooth">
@@ -564,12 +564,12 @@
           <button type="button" class="btn primary" id="tdptSaveBtn" data-i18n="settings.saveTdpt">保存并检测</button>
           <button type="button" class="btn" id="tdptEnvBtn" data-i18n="settings.env"
             data-i18n-title="settings.envTitle">自动配置环境</button>
-          <button type="button" class="btn" id="tdptDownloadBtn" data-i18n="settings.downloadPublic">自动下载模型</button>
+          <button type="button" class="btn" id="tdptDownloadBtn" data-i18n="settings.tdpt.downloadSingle">下载单帧公开模型</button>
           <span class="mode-badge realtime" data-i18n="mode.realtime" data-i18n-title="mode.realtimeTitle">实时</span>
           <button type="button" class="btn" id="tdptCameraBtn" data-i18n="settings.cameraOpen">打开实时摄像头</button>
           <button type="button" class="btn ghost" id="tdptOpenRoot" data-i18n="settings.openProject">打开项目目录</button>
         </div>
-        <p class="hint" id="tdptHint" data-i18n="settings.tdpt.hint">首次使用：先「自动配置环境」（依赖走阿里云镜像），再「自动下载模型」。CPU 即可实时运行。</p>
+        <p class="hint" id="tdptHint" data-i18n="settings.tdpt.hint">首次使用：先「自动配置环境」（依赖走阿里云镜像），再任选一个模型——可「下载单帧公开模型」快速开始，或手动放入 3 帧高精度模型。单帧模型 CPU 即可实时运行。</p>
         <p class="hint" id="tdptCameraHint" data-i18n="settings.tdpt.cameraHint">逐帧实时推理（不录制），结果以骨架叠加显示在 OpenCV 窗口中（绿点=置信度高）；关闭窗口或点「关闭实时摄像头」结束。</p>
       </section>
 

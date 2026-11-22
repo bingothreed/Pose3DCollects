@@ -464,6 +464,11 @@ function renderTdpt(status) {
   if (!status) return;
   statusChip($("#tdptReadyChip"), status.ready, t("settings.ready"), t("settings.notReady"));
   const missing = Object.entries(status.deps || {}).filter(([, ok]) => !ok).map(([name]) => name);
+  const modelDetail = status.model_ok
+    ? (status.model_fallback
+        ? t("settings.tdpt.modelFallback", { model: status.effective_model || "" })
+        : (status.effective_model || status.model || ""))
+    : t("settings.model.missing");
   const checks = [
     checkRow(t("settings.checks.project"), status.root_ok, shorten(status.root)),
     checkRow(t("settings.checks.python"), status.python_ok,
@@ -471,7 +476,7 @@ function renderTdpt(status) {
     checkRow(t("settings.checks.deps"), status.deps_ok,
       missing.length ? t("settings.detail.missingDeps", { items: missing.join(", ") })
         : "onnxruntime / opencv / numpy"),
-    checkRow(t("settings.checks.core"), status.model_ok, status.model || ""),
+    checkRow(t("settings.checks.tdptModel"), status.model_ok, modelDetail),
   ];
   $("#tdptChecks").innerHTML = checks.join("");
   const pathEl = $("#tdptModelsPath");
@@ -480,18 +485,23 @@ function renderTdpt(status) {
     pathEl.title = status.models_dir || "";
   }
 
-  $("#tdptModels").innerHTML = (status.models || []).map((model) => `
+  $("#tdptModels").innerHTML = (status.models || []).map((model) => {
+    const tier = model.tier === "high" ? t("settings.tdpt.tierHigh")
+      : model.tier === "fast" ? t("settings.tdpt.tierFast") : "";
+    return `
     <div class="model-row">
       <div class="model-main">
         <div class="model-title">${escapeHtml(model.label)}
-          ${model.required ? `<span class="chip">${escapeHtml(t("settings.required"))}</span>` : ""}</div>
+          ${tier ? `<span class="chip" title="${escapeHtml(model.note || "")}">${escapeHtml(tier)}</span>` : ""}
+          ${model.active ? `<span class="chip accent">${t("settings.model.current")}</span>` : ""}</div>
         <div class="model-file" title="${escapeHtml(model.path)}">${escapeHtml(shorten(model.path, 72))}</div>
       </div>
       <span class="model-state ${model.exists ? "ok" : "bad"}">${model.exists ? fmtBytes(model.size) : t("settings.model.missing")}</span>
       <button type="button" class="link-btn" data-open-path="${escapeHtml(model.path)}"
         title="${escapeHtml(t("settings.model.openDir"))}: ${escapeHtml(model.path)}">${t("settings.model.openDir")}</button>
     </div>
-  `).join("");
+  `;
+  }).join("");
 
   const busy = Boolean(status.setup_running);
   const tdptEnvReady = status.root_ok && status.python_ok && status.deps_ok;

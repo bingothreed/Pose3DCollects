@@ -279,7 +279,7 @@ def _check_engine(engine: str, params: dict | None = None) -> None:
         if not status["deps_ok"]:
             missing.append("Python 依赖")
         if not status["model_ok"]:
-            missing.append("模型 " + str(status["model"]))
+            missing.append("模型（单帧快速或三帧高精度，任选其一）")
         if missing:
             raise RuntimeError("TDPT 未就绪：缺少 " + "、".join(missing)
                                + "。请到「设置与资源」准备。")

@@ -32,6 +32,24 @@ TDPT_MODEL_SINGLE = "MobileNet3D3_6.onnx"
 TDPT_MODEL_THREE = "ThreeDPoseTracker_3frames.onnx"
 TDPT_MODEL_URL = ("https://raw.githubusercontent.com/digital-standard/ThreeDPoseTracker/"
                   "master/Assets/Model/MobileNet3D3_6.onnx")
+# The two VNect models are interchangeable quality tiers, not a required /
+# optional pair: either one is enough to run the engine.  The three-frame
+# model is the high-precision variant (slower); the public single-frame model
+# is the fast variant (and the only one that can be auto-downloaded).
+TDPT_MODELS = [
+    {
+        "file": TDPT_MODEL_THREE,
+        "label": "TDPT 3 帧模型（ThreeDPoseLibrary）",
+        "tier": "high",
+        "note": "448px · 三帧窗口 · 高精度，需手动放置（不会自动下载）",
+    },
+    {
+        "file": TDPT_MODEL_SINGLE,
+        "label": "TDPT 单帧模型（公共）",
+        "tier": "fast",
+        "note": "224px · MobileNet3D3_6 · 快速，可自动下载（约 33 MB）",
+    },
+]
 GEMX_SOMA_FILES = [
     "SOMA_neutral.npz",
     "SOMA_template_rig.usda",
@@ -492,9 +510,22 @@ def tdpt_python(cfg: dict) -> str:
 
 
 def tdpt_model_path(cfg: dict) -> Path:
+    """Return the model that will actually be used.
+
+    The configured model is preferred; when it is absent the other known
+    VNect model is used instead, because the two are interchangeable quality
+    tiers (three-frame = high precision, single-frame = fast).
+    """
     engine = cfg["engines"]["tdpt"]
     models_dir = Path(engine.get("models_dir") or Path(engine["root"]) / "models")
-    return models_dir / (engine.get("model") or TDPT_MODEL_SINGLE)
+    selected = models_dir / (engine.get("model") or TDPT_MODEL_SINGLE)
+    if selected.is_file():
+        return selected
+    for spec in TDPT_MODELS:
+        candidate = models_dir / spec["file"]
+        if candidate.is_file():
+            return candidate
+    return selected
 
 
 def tdpt_status(cfg: dict) -> dict:
@@ -502,6 +533,7 @@ def tdpt_status(cfg: dict) -> dict:
     root = Path(engine["root"])
     python = tdpt_python(cfg)
     models_dir = Path(engine.get("models_dir") or root / "models")
+    configured = engine.get("model") or TDPT_MODEL_SINGLE
     model_path = tdpt_model_path(cfg)
     root_ok = root.is_dir()
     python_ok = bool(python) and Path(python).is_file()
@@ -509,28 +541,36 @@ def tdpt_status(cfg: dict) -> dict:
     deps_ok = python_ok and all(deps.values())
     model_info = file_info(model_path)
     ready = root_ok and python_ok and deps_ok and model_info["exists"]
-    known = [
-        (TDPT_MODEL_THREE, "TDPT 3 帧模型（ThreeDPoseLibrary）",
-         "448px · 三帧窗口 · 本地转换，非自动下载"),
-        (TDPT_MODEL_SINGLE, "TDPT 单帧模型（公共）",
-         "224px · MobileNet3D3_6 · 约 33 MB"),
-    ]
     models = []
-    for name, label, note in known:
-        path = models_dir / name
-        models.append(_model_row(label, path, path == model_path, note))
-    if model_path not in (models_dir / name for name, _, _ in known):
-        models.append(_model_row("TDPT 自定义模型", model_path, True))
+    known_files = {spec["file"] for spec in TDPT_MODELS}
+    for spec in TDPT_MODELS:
+        path = models_dir / spec["file"]
+        models.append({
+            "label": spec["label"], "path": str(path), "note": spec["note"],
+            "tier": spec["tier"], "required": False,
+            "selected": spec["file"] == configured,
+            "active": path == model_path,
+            **file_info(path),
+        })
+    if configured not in known_files:
+        custom = models_dir / configured
+        models.append({
+            "label": "TDPT 自定义模型", "path": str(custom), "note": "",
+            "tier": "custom", "required": False, "selected": True,
+            "active": custom == model_path, **file_info(custom),
+        })
     return {
         "id": "tdpt",
         "name": "TDPT",
-        "subtitle": "VNect · 3 帧窗口 / 单帧 3D 骨架",
+        "subtitle": "VNect · 单帧快速 / 三帧高精度",
         "root": str(root),
         "python": python,
         "python_version": python_version(python) if python_ok else "",
         "models_dir": str(models_dir),
-        "model": engine.get("model") or TDPT_MODEL_SINGLE,
+        "model": configured,
         "model_path": str(model_path),
+        "effective_model": model_path.name,
+        "model_fallback": model_path.name != configured,
         "device": engine.get("device", "cpu"),
         "smooth": bool(engine.get("smooth", True)),
         "root_smooth": bool(engine.get("root_smooth", False)),

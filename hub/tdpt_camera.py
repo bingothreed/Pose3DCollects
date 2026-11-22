@@ -74,7 +74,8 @@ class TDPTCamera:
 
             model_path = engines.tdpt_model_path(cfg)
             if not model_path.is_file():
-                raise RuntimeError(f"模型未下载: {model_path.name}，请先点「自动下载模型」")
+                raise RuntimeError("未找到 TDPT 模型：请「自动下载」公开单帧模型，"
+                                   "或手动放置 3 帧高精度模型（二选一即可）")
 
             raw_index = engine.get("camera_index", 0) if camera_index is None else camera_index
             try:
