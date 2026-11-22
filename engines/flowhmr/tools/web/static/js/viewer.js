@@ -1,0 +1,1488 @@
+// "Result" card: three.js viewer for the generated SMPL-H mesh sequence, playback controls
+// and synchronisation with the source video.
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { $, show, personColor } from "./utils.js";
+import { appError, localize, message as m, setAttr, setText, t } from "./i18n.js";
+import * as api from "./api.js";
+import { initPreviewCharacter } from "./preview-character.js";
+import { applySourceCamera, sourceViewport, pelvisCameraTransform, animatedCameraTransform } from './paired-camera.js';
+import { sampleFrame, sameFrameSegment, scenePlacement, sceneActorVisible } from './frame-sample.js';
+import { cameraQualityMessage } from './camera-messages.js';
+import { bindSourceCamera } from './source-camera-controls.js';
+
+const BODY_STORAGE = "flowhmr-body-variant";
+const MOUSE_MODE_STORAGE = "flowhmr-mouse-mode";
+
+function rememberToggle(toggle, key, onChange) {
+  const saved = localStorage.getItem(key);
+  if (saved === "on" || saved === "off") toggle.checked = saved === "on";
+  const save = () => localStorage.setItem(key, toggle.checked ? "on" : "off");
+  toggle.addEventListener("change", () => {
+    save();
+    onChange?.(toggle.checked);
+  });
+  return save;
+}
+
+function halfFloatTable() {
+  const out = new Float32Array(65536);
+  for (let h = 0; h < out.length; h++) {
+    const s = (h & 0x8000) ? -1 : 1;
+    const e = (h >> 10) & 0x1f;
+    const f = h & 0x3ff;
+    out[h] = e === 0 ? s * 5.960464477539063e-8 * f
+      : e === 31 ? (f ? NaN : s * Infinity)
+      : s * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+  return out;
+}
+
+function floorGridTexture(renderer, size, dark) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 256;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = dark ? "#414141" : "#e4e4e4";
+  ctx.fillRect(0, 0, 256, 256);
+  ctx.fillStyle = dark ? "#6b6b6b" : "#ababab";
+  ctx.fillRect(0, 0, 6, 256);
+  ctx.fillRect(0, 0, 256, 6);
+  ctx.fillStyle = dark ? "#555555" : "#c4c4c4";
+  ctx.fillRect(127, 0, 3, 256);
+  ctx.fillRect(0, 127, 256, 3);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(size, size);
+  texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return texture;
+}
+
+export function initViewer(preview) {
+  const { video, clock } = preview;
+  const container = $("viewer");
+  const sourceFrameOverlay = $("sourceCameraFrame");
+  const scrub = $("scrub");
+  // Distant shots still need to distinguish closely spaced hair and clothing.
+  const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.autoUpdate = false;
+  container.appendChild(renderer.domElement);
+  const fromHalf = halfFloatTable();
+  let renderRequest = 0, dirty = false, loadController = null;
+  let bodyController = null;
+  function invalidate() {
+    dirty = true;
+    if (!renderRequest) renderRequest = requestAnimationFrame(tick);
+  }
+
+  const darkTheme = document.documentElement.dataset.theme === "dark";
+  const LIGHT_BG = 0xe4e4e4;
+  const DARK_BG = 0x414141;
+  const BG = darkTheme ? DARK_BG : LIGHT_BG;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(BG);
+  scene.fog = new THREE.Fog(BG, 10, 40);  // near/far follow the camera distance (see tick)
+
+  const perspective = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
+  const orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 200);
+  const recoveredCamera = new THREE.PerspectiveCamera();
+  let sourceView = false, cameraData = null, orbitCamera = perspective, sourceFrameValid = false;
+  let cameraNeedsSourceBody = false;
+  const sourceBodyPreview = () => sourceView && cameraNeedsSourceBody;
+  const defaultTarget = new THREE.Vector3(0, 0.9, 0);
+  const frontOffset = new THREE.Vector3(0, -0.43, 4.8);
+  const frontDirection = frontOffset.clone().normalize();
+  let camera = perspective;
+  camera.position.copy(defaultTarget).add(frontOffset);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.copy(defaultTarget);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 0.8;
+  controls.maxDistance = 25;
+
+  // Custom wheel zoom. The stock OrbitControls (r160) divides the wheel delta by
+  // (devicePixelRatio | 0), which is 0 at browser zoom < 100% -> infinite jumps, and it
+  // applies large trackpad/free-spin deltas in a single step. Here each wheel event only
+  // moves a target distance by a bounded factor, and the camera eases toward it per frame.
+  controls.enableZoom = false;
+  const zoom = { target: camera.position.distanceTo(controls.target) };
+  renderer.domElement.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (sourceView) return;
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? container.clientHeight : 1;
+    const px = Math.max(-120, Math.min(120, e.deltaY * unit));  // cap per event (~1 notch)
+    zoom.target = THREE.MathUtils.clamp(zoom.target * Math.pow(1.0015, px),
+      controls.minDistance, controls.maxDistance);
+    invalidate();
+  }, { passive: false });
+  const zoomDir = new THREE.Vector3();
+  function applyZoom() {
+    const dist = camera.position.distanceTo(controls.target);
+    if (Math.abs(dist - zoom.target) < 1e-4) return false;
+    const next = dist + (zoom.target - dist) * 0.2;
+    zoomDir.subVectors(camera.position, controls.target).normalize();
+    camera.position.copy(controls.target).addScaledVector(zoomDir, next);
+    if (camera === orthographic) updateOrthographic();
+    dirty = true;
+    return true;
+  }
+  window.__viewer = { get camera() { return camera; }, controls, zoom,
+    get renderCount() { return renderer.info.render.frame; },
+    get groundHeight() { return floor.position.y; },
+    get skeleton() { return actors[0]?.skeleton?.group; }, get actors() { return actors; } };  // for automated tests
+
+  // Soft studio lighting: sky/ground ambient, a front-top key light that casts the floor
+  // shadow (it follows the body, see setFrame), a cool fill from the side and a rim light.
+  const ambient = new THREE.HemisphereLight(0xf5f7ff, 0xc8ccd8, 1.4);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0xffffff, 1.9);
+  const SUN_OFFSET = new THREE.Vector3(-2.2, 6, 3.6);  // front-left: shadow falls back-right
+  sun.position.copy(SUN_OFFSET);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.02;
+  const fill = new THREE.DirectionalLight(0xe6ebff, 0.55);
+  fill.position.set(4, 2, 2);
+  const rim = new THREE.DirectionalLight(0xffffff, 0.7);
+  rim.position.set(1.5, 3, -5);
+  scene.add(fill, rim);
+  Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 0.5, far: 20 });
+  scene.add(sun, sun.target);
+
+  function syncCharacterLighting() {
+    const custom = !!character.active && !sourceBodyPreview();
+    ambient.intensity = custom ? .62 : 1.4;
+    sun.intensity = custom ? 1.42 : 1.9;
+    fill.intensity = custom ? .28 : .55;
+    rim.intensity = custom ? .45 : .7;
+  }
+
+  // Editor grid over the shadow plane, with the two horizontal world axes.
+  const FLOOR_SIZE = 200;
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(FLOOR_SIZE, FLOOR_SIZE),
+    new THREE.MeshBasicMaterial({ map: floorGridTexture(renderer, FLOOR_SIZE, darkTheme) }));
+  floor.rotation.x = -Math.PI / 2;
+  const axes = new THREE.BufferGeometry();
+  axes.setAttribute("position", new THREE.Float32BufferAttribute([
+    -100, 0.01, 0, 100, 0.01, 0, 0, 0.01, -100, 0, 0.01, 100,
+  ], 3));
+  const red = new THREE.Color(0xad5757);
+  const green = new THREE.Color(0x55875a);
+  axes.setAttribute("color", new THREE.Float32BufferAttribute([
+    ...red.toArray(), ...red.toArray(), ...green.toArray(), ...green.toArray(),
+  ], 3));
+  const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(FLOOR_SIZE, FLOOR_SIZE),
+    new THREE.ShadowMaterial({ color: 0x4b5468, opacity: 0.34 }));
+  shadowPlane.rotation.x = -Math.PI / 2;
+  shadowPlane.position.y = 0.001;
+  shadowPlane.receiveShadow = true;
+  const axisLines = new THREE.LineSegments(axes, new THREE.LineBasicMaterial({ vertexColors: true }));
+  scene.add(floor, shadowPlane, axisLines);
+  window.addEventListener("flowhmr:themechange", ({ detail }) => {
+    const dark = detail.dark;
+    const bg = dark ? DARK_BG : LIGHT_BG;
+    scene.background.setHex(bg);
+    scene.fog.color.setHex(bg);
+    floor.material.map.dispose();
+    floor.material.map = floorGridTexture(renderer, FLOOR_SIZE, dark);
+    invalidate();
+  });
+
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xa9a9a9, roughness: 0.75, metalness: 0.0 });
+  let actors = [], estimatedGround = null;
+  const skeletonToggle = $("optSkeleton"), coneToggle = $("optBoneCones"), skinToggle = $("optSkin");
+  const bodySelect = $("bodyVariant");
+  const groundAuto = $("optGroundAuto"), groundInput = $("groundHeight"), wireToggle = $("toggleWire");
+  let showSkeletonOverlay = localStorage.getItem("flowhmr-skeleton") !== "off";
+  const savedSkin = localStorage.getItem("flowhmr-skin");
+  let showSkin = savedSkin === null ? localStorage.getItem("flowhmr-skeleton-only") !== "on" : savedSkin === "on";
+  skeletonToggle.checked = showSkeletonOverlay;
+  coneToggle.checked = localStorage.getItem("flowhmr-bone-cones") === "on";
+  const state = {
+    jobId: null, meta: null, scene: null, bodyVariant: "neutral", frame: 0, visualFrame: -1, playbackPosition: 0,
+    playing: false, speed: 1, lastT: 0,
+    prevRoot: new THREE.Vector3(),
+  };
+  const character = initPreviewCharacter(() => actors, (editedActor) => {
+    const previewChanged = updateSourceAvailability();
+    if (editedActor && !previewChanged) {
+      // While adjusting retarget offsets only the draft rig needs a redraw.
+      drawActorFrame(editedActor, state.visualFrame);
+      updateSourceCamera();
+      renderer.shadowMap.needsUpdate = true;
+      invalidate();
+      return;
+    }
+    syncSkeletonDisplay();
+    if (state.meta && state.visualFrame >= 0) updateFrameRoot(state.visualFrame);
+    if (sourceView) {
+      showSourceQuality();
+      updateSourceCamera();
+    }
+    labelBody();
+  }, (error) => setText($("viewportObject"), error));
+  $("retargetDialog").addEventListener("close",syncSkeletonDisplay);
+
+  function updateOrthographic() {
+    const halfHeight = camera.position.distanceTo(controls.target) * Math.tan(THREE.MathUtils.degToRad(perspective.fov / 2));
+    const halfWidth = halfHeight * perspective.aspect;
+    Object.assign(orthographic, { left: -halfWidth, right: halfWidth, top: halfHeight, bottom: -halfHeight });
+    orthographic.updateProjectionMatrix();
+  }
+
+  function resize() {
+    const w = container.clientWidth, h = container.clientHeight;
+    renderer.setSize(w, h, false);
+    perspective.aspect = Math.max(w, 1) / Math.max(h, 1);
+    perspective.updateProjectionMatrix();
+    updateOrthographic();
+    invalidate();
+  }
+  new ResizeObserver(resize).observe(container);
+  resize();
+
+  const views = {
+    front: new THREE.Vector3(0, 0, 1),
+    back: new THREE.Vector3(0, 0, -1),
+    right: new THREE.Vector3(1, 0, 0),
+    left: new THREE.Vector3(-1, 0, 0),
+    top: new THREE.Vector3(0, 1, 0),
+    bottom: new THREE.Vector3(0, -1, 0),
+  };
+  const gizmo = $("viewGizmo");
+  const gizmoButtons = [...gizmo.querySelectorAll("[data-view]")];
+  const inverseView = new THREE.Quaternion();
+  const projected = new THREE.Vector3();
+  function updateGizmo() {
+    inverseView.copy(camera.quaternion).invert();
+    for (const button of gizmoButtons) {
+      projected.copy(views[button.dataset.view]).applyQuaternion(inverseView);
+      const x = 46 + projected.x * 28;
+      const y = 46 - projected.y * 28;
+      button.style.left = `${x}px`;
+      button.style.top = `${y}px`;
+      button.style.zIndex = Math.round(10 + projected.z * 9);
+      button.style.opacity = projected.z < -0.28 ? "0.62" : "1";
+      if (button.textContent) {
+        const line = gizmo.querySelector(`line.gizmo-${button.textContent.toLowerCase()}`);
+        line.setAttribute("x2", x);
+        line.setAttribute("y2", y);
+      }
+    }
+  }
+  controls.addEventListener("change", () => { updateGizmo(); invalidate(); });
+  controls.addEventListener("start", () => {
+    setText($("viewportName"), m(camera === orthographic ? "view.user_orthographic" : "view.user_perspective"));
+  });
+  controls.update();
+  updateGizmo();
+
+  function setProjection(next) {
+    if (sourceView) {
+      const usedSourceBody = sourceBodyPreview();
+      sourceView = false;
+      show('sourceCameraWarning', false);
+      camera = orbitCamera;
+      controls.object = camera;
+      controls.enabled = true;
+      sourceCamera.syncView();
+      if (usedSourceBody) {
+        syncSkeletonDisplay();
+        state.prevRoot.copy(frameRoot(state.visualFrame));
+        labelBody();
+      }
+      actors.forEach((actor) => drawActorFrame(actor,state.visualFrame));
+    }
+    if (next !== camera) {
+      next.position.copy(camera.position);
+      next.quaternion.copy(camera.quaternion);
+      controls.object = camera = next;
+    }
+    updateOrthographic();
+    controls.update();
+    updateGizmo();
+    setText($("viewportName"), m(camera === orthographic ? "view.user_orthographic" : "view.user_perspective"));
+    invalidate();
+  }
+  function clearOrbitInertia() {
+    const damping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = damping;
+  }
+  function setView(name) {
+    const direction = views[name];
+    clearOrbitInertia();
+    setProjection(orthographic);
+    const distance = camera.position.distanceTo(controls.target);
+    camera.position.copy(controls.target).addScaledVector(direction, distance);
+    controls.update();
+    updateOrthographic();
+    updateGizmo();
+    zoom.target = distance;
+    setText($("viewportName"), m("view.orthographic_direction", { direction: m(`view.${name}`) }));
+  }
+  function toggleProjection() {
+    setProjection(camera === perspective ? orthographic : perspective);
+  }
+  $("toggleProjection").onclick = toggleProjection;
+  const cameraSubject = () => actors[0];
+  const identityCamera = { scale: 1, translation: [0, 0, 0] };
+  const cameraPelvis = new THREE.Vector3();
+
+  function updateSourceAvailability() {
+    const previous = cameraNeedsSourceBody;
+    const entry = cameraSubject()?.character;
+    cameraNeedsSourceBody = !!entry && !entry.rig.cameraRig;
+    sourceCamera.setPreviewHint(cameraNeedsSourceBody ? m('camera.preview_source_body') : '');
+    return sourceView && cameraNeedsSourceBody !== previous;
+  }
+  function cameraTransform(frame) {
+    const actor = cameraSubject(), entry = actor?.character, rig = entry?.rig.cameraRig;
+    if (!rig) return identityCamera;
+    rig.pelvis.getWorldPosition(cameraPelvis);
+    actor.group.worldToLocal(cameraPelvis);
+    return pelvisCameraTransform(rig.scale, entry.motion, actorFrame(actor, frame),
+      cameraPelvis.toArray(), scenePlacement(actor.sceneTrack, sourceStart(state.meta) + frame));
+  }
+  async function exportCameraTransform(signal) {
+    const actor = cameraSubject(), entry = actor?.character;
+    if (!entry?.rig.cameraRig) return identityCamera;
+    const { asset, libraryId, motion, poseOffsets } = entry;
+    const pmx = asset.kind === 'pmx';
+    const solver = await (pmx ? import('./pmx-retarget.js') : import('./fbx-character-retarget.js'));
+    signal.throwIfAborted();
+    const mesh = asset.clone();
+    try {
+      const rig = pmx ? solver.createPmxRetarget(mesh, asset.rest, motion, { poseOffsets })
+        : solver.createFbxCharacterRetarget(mesh, asset, motion, { poseOffsets, libraryId });
+      const { scale, pelvis } = rig.cameraRig;
+      const target = new THREE.Vector3(), offsets = [];
+      let nextYield = performance.now() + 20;
+      for (let f = 0; f < motion.frames; f++) {
+        signal.throwIfAborted();
+        if (!rig.apply(f)) throw appError('retarget.export_failed');
+        pelvis.getWorldPosition(target);
+        const actorPlacement = scenePlacement(actor.sceneTrack, sourceStart(actor.meta) + f);
+        offsets.push(pelvisCameraTransform(scale, motion, f, target.toArray(), actorPlacement).translation);
+        if (performance.now() >= nextYield) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+          nextYield = performance.now() + 20;
+        }
+      }
+      return animatedCameraTransform(scale, sourceStart(actor.meta), offsets);
+    } finally {
+      asset.releaseClone(mesh);
+    }
+  }
+  function sourceActorVisible(frame) {
+    if (!sourceView || !state.meta || !cameraData?.source_body_visible) return true;
+    const index = Math.floor(sourceStart(state.meta)+frame-cameraData.track_start);
+    return cameraData.source_body_visible[index] !== false;
+  }
+  function updateSourceCamera() {
+    if (!sourceView || !cameraData || !state.meta) return;
+    const frame = presentationFrame(state.visualFrame);
+    sourceFrameValid = applySourceCamera(recoveredCamera, cameraData,
+      sourceStart(state.meta) + frame - cameraData.track_start, cameraTransform(frame));
+    const label = sourceFrameValid
+      ? (sourceActorVisible(state.visualFrame) ? 'view.source_camera' : 'view.source_camera_cutaway')
+      : 'view.source_camera_gap';
+    setText($('viewportName'), m(label));
+    invalidate();
+  }
+  function showSourceQuality() {
+    const quality = cameraQualityMessage(cameraData?.quality, cameraData?.coverage);
+    const message = sourceBodyPreview() ? m('camera.preview_source_body') : quality;
+    if (sourceBodyPreview() && quality) {
+      setText($('sourceCameraWarning'), () => `${t('camera.preview_source_body')} ${localize(quality)}`);
+    } else setText($('sourceCameraWarning'), message);
+    show('sourceCameraWarning', sourceView && !!message);
+  }
+  const sourceCamera = bindSourceCamera({
+    exportTransform: exportCameraTransform,
+    showing: () => sourceView,
+    exit: () => setProjection(orbitCamera),
+    enter: () => {
+      clearOrbitInertia();
+      orbitCamera = camera;
+      sourceView = true;
+      controls.enabled = false;
+      camera = recoveredCamera;
+      sourceCamera.syncView();
+      if (sourceBodyPreview()) {
+        syncSkeletonDisplay();
+        updateFrameRoot(state.visualFrame);
+        labelBody();
+      }
+      actors.forEach((actor) => drawActorFrame(actor,state.visualFrame));
+      showSourceQuality();
+      updateSourceCamera();
+    },
+    replaceCamera: (data) => {
+      cameraData = data;
+      if (sourceView) actors.forEach((actor) => drawActorFrame(actor,state.visualFrame));
+      syncGround();
+      showSourceQuality();
+      updateSourceCamera();
+    },
+  });
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.onclick = () => setView(button.dataset.view);
+  });
+  const mouseTools = [...document.querySelectorAll("[data-mouse-mode]")];
+  function setMouseMode(mode) {
+    const pan = mode === "pan";
+    controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+    controls.mouseButtons.MIDDLE = pan ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    controls.mouseButtons.RIGHT = pan ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    for (const button of mouseTools) button.setAttribute("aria-pressed", String(button.dataset.mouseMode === mode));
+    setText($("viewControlHint"), m(pan ? "view.pan_status" : "view.rotate_status"));
+  }
+  for (const tool of mouseTools) {
+    tool.onclick = () => {
+      const mode = tool.dataset.mouseMode;
+      setMouseMode(mode);
+      localStorage.setItem(MOUSE_MODE_STORAGE, mode);
+    };
+  }
+  setMouseMode(localStorage.getItem(MOUSE_MODE_STORAGE) === "rotate" ? "rotate" : "pan");
+  $("toggleGrid").onclick = (event) => {
+    floor.visible = axisLines.visible = !floor.visible;
+    shadowPlane.visible = floor.visible && (!actors.length || actors.some(({ body, character }) => body.visible || character?.mesh.visible));
+    event.currentTarget.setAttribute("aria-pressed", String(floor.visible));
+    invalidate();
+  };
+  function syncCharacterWire(root) {
+    root?.traverse((object) => {
+      if (!object.isMesh) return;
+      for (const material of [].concat(object.material)) {
+        if (!material || material.wireframe === bodyMat.wireframe) continue;
+        material.wireframe = bodyMat.wireframe;
+        material.needsUpdate = true;
+      }
+    });
+  }
+
+  wireToggle.onclick = (event) => {
+    bodyMat.wireframe = !bodyMat.wireframe;
+    bodyMat.needsUpdate = true;
+    for (const { body, character } of actors) {
+      body.material.wireframe = bodyMat.wireframe;
+      body.material.needsUpdate = true;
+      syncCharacterWire(character?.mesh);
+    }
+    event.currentTarget.setAttribute("aria-pressed", String(bodyMat.wireframe));
+    setText($("viewportMode"), m(bodyMat.wireframe ? "view.wire_preview" : "view.solid"));
+    renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  };
+
+  function removeActors() {
+    character.releaseActors(actors);
+    for (const actor of actors) {
+      removeSkeleton(actor);
+      scene.remove(actor.group);
+      actor.body.geometry.dispose();
+      if (actor.body.material !== bodyMat) actor.body.material.dispose();
+    }
+    actors = [];
+    show("previewCharacter", false);
+    window.dispatchEvent(new Event("flowhmr:characterchange"));
+  }
+
+  function setGround(height) {
+    floor.position.y = axisLines.position.y = height;
+    shadowPlane.position.y = height + 0.001;
+    invalidate();
+  }
+
+  function syncGround() {
+    groundInput.disabled = groundAuto.checked;
+    if (groundAuto.checked) {
+      const height = estimatedGround?.height_m ?? 0;
+      setGround(height);
+      groundInput.value = height.toFixed(3);
+      const source = ["correction", "shared", "contacts", "soles"].includes(estimatedGround?.source)
+        ? estimatedGround.source : "unavailable";
+      setText($("groundSource"), m(`view.ground_${source}`));
+    } else {
+      setText($("groundSource"), estimatedGround
+        ? m("view.ground_reference", { height: estimatedGround.height_m.toFixed(3) }) : m("view.ground_manual"));
+    }
+  }
+  groundAuto.addEventListener("change", syncGround);
+  groundInput.addEventListener("input", () => {
+    if (!groundAuto.checked && Number.isFinite(Math.fround(groundInput.valueAsNumber))) {
+      setGround(groundInput.valueAsNumber);
+    }
+  });
+
+  function removeSkeleton(actor) {
+    const { skeleton } = actor;
+    if (!skeleton) return;
+    actor.group.remove(skeleton.group);
+    for (const item of skeleton.group.children) {
+      item.dispose?.();
+      item.geometry.dispose();
+      item.material.dispose();
+    }
+    actor.skeleton = null;
+  }
+
+  function makeBoneCones(count, xray) {
+    // Square shoulder close to the head and a long tapered tail, as in
+    // Blender's Octahedral display. The bone's local Z runs from head to tail.
+    const points = [
+      [0, 0, 0], [-.1, -.1, .1], [.1, -.1, .1], [.1, .1, .1], [-.1, .1, .1], [0, 0, 1],
+    ];
+    const faces = [[0, 2, 1], [0, 3, 2], [0, 4, 3], [0, 1, 4], [5, 1, 2], [5, 2, 3], [5, 3, 4], [5, 4, 1]];
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(faces.flatMap((face) => face.flatMap((i) => points[i])), 3));
+    geometry.setAttribute("boneBarycentric", new THREE.Float32BufferAttribute(faces.flatMap(() => [1, 0, 0, 0, 1, 0, 0, 0, 1]), 3));
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({ color: 0xb2b2b2, roughness: 0.88, ...xray });
+    material.onBeforeCompile = (shader) => {
+      // Shade a thin contour on each visible face in the same draw call.
+      shader.uniforms.boneEdgeColor = { value: new THREE.Color(0x27282b) };
+      shader.vertexShader = "attribute vec3 boneBarycentric; varying vec3 vBoneBarycentric;\n" + shader.vertexShader
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBoneBarycentric = boneBarycentric;");
+      shader.fragmentShader = "uniform vec3 boneEdgeColor; varying vec3 vBoneBarycentric;\n" + shader.fragmentShader
+        .replace("#include <opaque_fragment>", `
+          vec3 pixelWidth = max(fwidth(vBoneBarycentric), vec3(0.0001));
+          vec3 edgeFade = smoothstep(vec3(0.06), vec3(0.96), vBoneBarycentric / pixelWidth);
+          outgoingLight = mix(boneEdgeColor, outgoingLight, min(edgeFade.x, min(edgeFade.y, edgeFade.z)));
+          #include <opaque_fragment>
+        `);
+    };
+    const cones = new THREE.InstancedMesh(geometry, material, count);
+    cones.name = "skeleton-cones";
+    cones.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    cones.frustumCulled = false;
+    cones.renderOrder = 4;
+    return cones;
+  }
+
+  const boneAxis = new THREE.Vector3(0, 0, 1), boneHead = new THREE.Vector3(), boneDirection = new THREE.Vector3();
+  const boneScale = new THREE.Vector3(), boneRotation = new THREE.Quaternion(), boneMatrix = new THREE.Matrix4();
+  const inverseActor = new THREE.Matrix4();
+  function drawSkeletonFrame(actor, frame) {
+    const { skeleton } = actor;
+    if (!skeleton?.group.visible) return;
+    const { points, lines, cones, stride, joints, edges, parents } = skeleton;
+    if ($("retargetDialog").open && actor.character && !sourceBodyPreview()) {
+      const { mesh, rig } = actor.character;
+      const bones = characterBones(actor.character);
+      actor.group.updateWorldMatrix(true, false);
+      mesh.updateMatrixWorld(true);
+      inverseActor.copy(actor.group.matrixWorld).invert();
+      for (let j = 0; j < parents.length; j++) {
+        const bone = bones[rig.sourceToTarget[j]];
+        if (bone) boneHead.setFromMatrixPosition(bone.matrixWorld).applyMatrix4(inverseActor).toArray(points.array, j * 3);
+        else if (parents[j] >= 0) points.array.copyWithin(j * 3, parents[j] * 3, parents[j] * 3 + 3);
+      }
+    } else {
+      const lo = Math.floor(frame), hi = Math.min(lo + 1, actor.meta.num_frames - 1), t = frame - lo;
+      if (!t || lo === hi) points.array.set(joints.subarray(lo * stride, (lo + 1) * stride));
+      else {
+        const a = lo * stride, b = hi * stride;
+        for (let i = 0; i < stride; i++) points.array[i] = joints[a + i] + t * (joints[b + i] - joints[a + i]);
+      }
+    }
+    points.needsUpdate = true;
+    if (cones.visible) {
+      let count = 0;
+      for (let i = 0; i < edges.length; i += 2) {
+        boneHead.fromArray(points.array, edges[i] * 3);
+        boneDirection.fromArray(points.array, edges[i + 1] * 3).sub(boneHead);
+        const length = boneDirection.length();
+        if (!Number.isFinite(length) || length < 1e-6) continue;
+        boneScale.setScalar(length);
+        boneRotation.setFromUnitVectors(boneAxis, boneDirection.divideScalar(length));
+        cones.setMatrixAt(count++, boneMatrix.compose(boneHead, boneRotation, boneScale));
+      }
+      cones.count = count;
+      cones.instanceMatrix.needsUpdate = true;
+    } else {
+      for (let i = 0; i < edges.length; i++) {
+        const from = edges[i] * 3;
+        lines.array.set(points.array.subarray(from, from + 3), i * 3);
+      }
+      lines.needsUpdate = true;
+    }
+  }
+
+  function syncSkeletonDisplay() {
+    syncCharacterLighting();
+    const ready = actors.some((a) => a.skeleton);
+    const only = ready && !showSkin;
+    const visible = ready && (only || showSkeletonOverlay);
+    skeletonToggle.checked = only || showSkeletonOverlay;
+    skeletonToggle.disabled = !ready || only;
+    skinToggle.checked = !only;
+    skinToggle.disabled = !ready;
+    coneToggle.disabled = !visible;
+    shadowPlane.visible = floor.visible && !only;
+    wireToggle.disabled = only;
+    setText($("viewportMode"), m(only ? "view.skeleton_only" : bodyMat.wireframe ? "view.wire_preview" : "view.solid"));
+    setAttr($("skeletonOverlayLabel"), "title", m(character.active
+      ? $("retargetDialog").open ? "pose.target_overlay" : "character.skeleton" : "view.skeleton_hint"));
+    for (const actor of actors) {
+      const mesh = actor.character?.mesh;
+      const skinVisible = !only || !actor.skeleton;
+      const source = sourceBodyPreview();
+      actor.body.visible = (!mesh || source) && skinVisible;
+      if (mesh) {
+        mesh.visible = !source && skinVisible;
+        syncCharacterWire(mesh);
+      }
+      if (actor.skeleton) {
+        const { group, bones, cones, jointMarkers } = actor.skeleton;
+        group.visible = visible;
+        bones.visible = !coneToggle.checked;
+        jointMarkers.visible = !coneToggle.checked;
+        cones.visible = coneToggle.checked;
+        cones.material.depthTest = cones.material.depthWrite = only;
+      }
+      drawActorFrame(actor, state.visualFrame);
+    }
+    renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  }
+
+  function setInspection(actor, info) {
+    if (!state.scene) {
+      if (info && Number.isFinite(info.ground?.height_m)) estimatedGround = info.ground;
+      syncGround();
+    }
+    const parents = info?.parents;
+    if (!Array.isArray(parents) || info.frames !== actor.meta.num_frames || parents[0] !== -1
+        || !parents.slice(1).every((parent, i) => Number.isInteger(parent) && parent >= 0 && parent <= i)
+        || info.joints.length !== info.frames * parents.length * 3) return;
+    removeSkeleton(actor);
+    const edges = parents.slice(1).flatMap((parent, i) => [parent, i + 1]);
+    const stride = parents.length * 3;
+    const attribute = (length) => new THREE.BufferAttribute(new Float32Array(length), 3).setUsage(THREE.DynamicDrawUsage);
+    const points = attribute(stride), lines = attribute(edges.length * 3);
+    const pointsGeometry = new THREE.BufferGeometry().setAttribute("position", points);
+    const linesGeometry = new THREE.BufferGeometry().setAttribute("position", lines);
+    const xray = { depthTest: false, depthWrite: false };
+    const bones = new THREE.LineSegments(linesGeometry, new THREE.LineBasicMaterial({ color: 0xffb860, ...xray }));
+    const joints = new THREE.Points(pointsGeometry, new THREE.PointsMaterial({ color: 0xffe8a9, size: 4, sizeAttenuation: false, ...xray }));
+    const cones = makeBoneCones(edges.length / 2, xray);
+    bones.name = "skeleton-bones"; joints.name = "skeleton-joints";
+    bones.renderOrder = 4; joints.renderOrder = 5;
+    bones.frustumCulled = joints.frustumCulled = false;
+    const group = new THREE.Group();
+    group.add(bones, joints, cones);
+    actor.group.add(group);
+    actor.skeleton = { group, points, lines, bones, cones, jointMarkers: joints, stride, joints: info.joints, edges, parents };
+    syncSkeletonDisplay();
+  }
+  skeletonToggle.addEventListener("change", () => {
+    showSkeletonOverlay = skeletonToggle.checked;
+    localStorage.setItem("flowhmr-skeleton", showSkeletonOverlay ? "on" : "off");
+    syncSkeletonDisplay();
+  });
+  coneToggle.addEventListener("change", () => {
+    localStorage.setItem("flowhmr-bone-cones", coneToggle.checked ? "on" : "off");
+    syncSkeletonDisplay();
+  });
+  skinToggle.addEventListener("change", () => {
+    showSkin = skinToggle.checked;
+    localStorage.setItem("flowhmr-skin", showSkin ? "on" : "off");
+    syncSkeletonDisplay();
+  });
+
+  const sourceStart = (meta) => meta.track_start ?? 0;
+  const actorFrame = (actor, frame) => sourceStart(state.meta) + frame - sourceStart(actor.meta);
+
+  function presentationFrame(frame, sourceFrame = Math.floor(frame)) {
+    if (state.meta.visible_ranges && sceneActorVisible(state.meta, sourceStart(state.meta) + frame)
+        !== sceneActorVisible(state.meta, sourceStart(state.meta) + sourceFrame)) return sourceFrame;
+    if (!sourceView || !cameraData) {
+      const { num_frames: count, shot_ids: shots } = state.meta;
+      if (!shots) return frame;
+      return sameFrameSegment(frame, sourceFrame, count, null, shots) ? sampleFrame(frame, count, null, shots).frame : sourceFrame;
+    }
+    const offset = sourceStart(state.meta) - cameraData.track_start;
+    const local = frame + offset;
+    const { RT, camera_valid: valid, shot_ids: shots } = cameraData;
+    if (!sameFrameSegment(local, sourceFrame + offset, RT.length, valid, shots)) return sourceFrame;
+    return sampleFrame(local, RT.length, valid, shots).frame - offset;
+  }
+
+  function frameRoot(f) {
+    const root = new THREE.Vector3();
+    for (const actor of actors) {
+      const p = Math.min(actor.meta.num_frames - 1, Math.max(0, actorFrame(actor, f)));
+      const lo = Math.floor(p), hi = Math.min(lo + 1, actor.meta.num_frames - 1);
+      const [a, b] = actor.meta.root_trajectory[lo], [c, d] = actor.meta.root_trajectory[hi];
+      const blend = p - lo;
+      let x = a + blend * (c - a), z = b + blend * (d - b);
+      const scale = sourceBodyPreview() ? 1 : actor.character?.rig.rootMotionScale ?? 1;
+      if (scale !== 1) {
+        const [startX, startZ] = actor.meta.root_trajectory[0];
+        x = startX + (x - startX) * scale;
+        z = startZ + (z - startZ) * scale;
+      }
+      root.x += x * actor.cos + z * actor.sin + actor.group.position.x;
+      root.z += z * actor.cos - x * actor.sin + actor.group.position.z;
+    }
+    return root.divideScalar(Math.max(1, actors.length));
+  }
+
+  function drawActorFrame(actor, globalFrame) {
+    const { body, group, meta, verts } = actor;
+    const source = sourceStart(state.meta) + globalFrame;
+    const { yaw, offset } = scenePlacement(actor.sceneTrack, source);
+    if (group.rotation.y !== yaw) {
+      group.rotation.y = yaw;
+      actor.cos = Math.cos(yaw);
+      actor.sin = Math.sin(yaw);
+    }
+    group.position.fromArray(offset);
+    let f = actorFrame(actor, globalFrame);
+    if (!sceneActorVisible(actor.sceneTrack, Math.floor(source) + 1)) f = Math.floor(f);
+    group.visible = globalFrame >= 0 && f >= 0 && f < meta.num_frames && sourceActorVisible(globalFrame)
+      && sceneActorVisible(actor.sceneTrack, source);
+    const anchor = sourceView && !sourceBodyPreview() && actor === cameraSubject() && actor.character?.rig.cameraRig;
+    if (anchor) actor.character.rig.apply(Math.max(0, Math.min(f, meta.num_frames - 1)));
+    if (!group.visible) return;
+    if (actor.character && !sourceBodyPreview()) {
+      if (!anchor && (actor.character.mesh.visible || ($("retargetDialog").open && actor.skeleton?.group.visible))) actor.character.rig.apply(f);
+      drawSkeletonFrame(actor, f);
+      return;
+    }
+    drawSkeletonFrame(actor, f);
+    if (!body.visible) return;
+    const pos = body.geometry.attributes.position;
+    const n = pos.array.length;
+    const lo = Math.floor(f), hi = Math.min(lo + 1, meta.num_frames - 1), t = f - lo;
+    const a = lo * n, b = hi * n;
+    for (let i = 0; i < n; i++) {
+      const at = fromHalf[verts[a + i]];
+      pos.array[i] = t && lo !== hi ? at + t * (fromHalf[verts[b + i]] - at) : at;
+    }
+    pos.needsUpdate = true;
+    body.geometry.computeVertexNormals();
+  }
+
+  function updateFrameRoot(f) {
+    const root = frameRoot(f);
+    sun.position.copy(root).add(SUN_OFFSET);
+    sun.target.position.copy(root);
+    if (!sourceView && $("optFollow").checked) {
+      const delta = root.clone().sub(state.prevRoot);
+      camera.position.add(delta);
+      controls.target.add(delta);
+    }
+    state.prevRoot.copy(root);
+  }
+
+  function setFrame(f, sourceFrame = Math.floor(f)) {
+    const m = state.meta;
+    if (!m || !actors.length || !Number.isFinite(f)) return;
+    state.playbackPosition = Math.max(0, f);
+    const integer = Math.max(0, Math.min(m.num_frames - 1, sourceFrame));
+    // Keep normal-speed renders on source frames. At slow speeds or higher
+    // display rates, draw in-between poses without changing the source clock.
+    const fractional = state.playing && (state.speed < 1 || displayRate() > m.fps);
+    const pose = presentationFrame(fractional ? Math.min(m.num_frames - 1, state.playbackPosition) : integer, integer);
+    if (pose === state.visualFrame && integer === state.frame) {
+      if (fractional) renderFrameCounter();
+      return;
+    }
+    if (integer !== state.frame) {
+      state.frame = integer;
+      scrub.value = integer;
+    }
+    if (pose === state.visualFrame) {
+      renderFrameCounter();
+      return;
+    }
+    state.visualFrame = pose;
+    for (const actor of actors) drawActorFrame(actor, pose);
+    updateFrameRoot(pose);
+    updateSourceCamera();
+    renderFrameCounter();
+    const position = pose / Math.max(1, m.num_frames - 1);
+    $("timelineTrack").style.setProperty("--playhead", `calc(${position * 100}% + ${12 - 24 * position}px)`);
+    renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  }
+
+  const frameButtons = [...document.querySelectorAll("[data-frame-action]")];
+  const fpsSelect = $("displayFps"), fpsKey = "flowhmr-display-fps";
+  const savedFps = localStorage.getItem(fpsKey);
+  if ([...fpsSelect.options].some((option) => option.value === savedFps)) fpsSelect.value = savedFps;
+  const displayRate = () => Number(fpsSelect.value) || state.meta?.fps || 30;
+  const displayOffset = () => state.scene ? sourceStart(state.meta) : 0;
+  const frameNumber = (f) => Math.floor((displayOffset() + f) * displayRate() / state.meta.fps + 1e-8) + 1;
+  const displayEnd = () => Math.max(frameNumber(state.meta.num_frames - 1),
+    Math.round((displayOffset() + state.meta.num_frames) * displayRate() / state.meta.fps));
+  function renderFrameCounter() {
+    if (!state.meta || state.frame < 0) return;
+    const rate = displayRate();
+    const end = displayEnd();
+    const frame = !state.playing && state.frame === state.meta.num_frames - 1 ? end :
+      Math.min(end, frameNumber(rate === state.meta.fps ? state.frame : state.playbackPosition));
+    $("frameLabel").textContent = `${frame} / ${end}`;
+    $("playhead").textContent = frame;
+  }
+  fpsSelect.onchange = () => {
+    localStorage.setItem(fpsKey, fpsSelect.value);
+    setTimeline(state.meta?.num_frames ?? 0);
+  };
+  function setTimeline(frameCount) {
+    const ready = frameCount > 0;
+    scrub.max = Math.max(0, frameCount - 1);
+    scrub.value = Math.max(0, state.frame);
+    scrub.disabled = $("btnPlay").disabled = $("speed").disabled = !ready;
+    for (const button of frameButtons) button.disabled = !ready;
+    $("timelineTrack").classList.toggle("has-motion", ready);
+    const start = ready ? frameNumber(0) : 1;
+    $("timelineRange").textContent = ready ? `${start}–${displayEnd()} · ${displayRate()} FPS` : `${displayRate()} FPS`;
+    const tickCount = Math.min(5, frameCount);
+    const ticks = Array.from({ length: tickCount }, (_, i) => {
+      const tick = document.createElement("span");
+      tick.textContent = i > 0 && i === tickCount - 1 ? displayEnd() :
+        frameNumber(Math.round(i * (frameCount - 1) / Math.max(1, tickCount - 1)));
+      return tick;
+    });
+    $("timelineTicks").replaceChildren(...ticks);
+    if (!ready) $("frameLabel").textContent = "– / –";
+    else renderFrameCounter();
+  }
+
+  function frameView(direction) {
+    const m = state.meta;
+    const root = m ? frameRoot(state.visualFrame) : new THREE.Vector3();
+    const height = m ? Math.max(1.2, m.bbox_max[1] - m.bbox_min[1]) : defaultTarget.y * 2;
+    const width = state.scene ? Math.hypot(m.bbox_max[0] - m.bbox_min[0], m.bbox_max[2] - m.bbox_min[2]) : 0;
+    const distance = m ? Math.max(4, height * 2.4, width * 1.7) : frontOffset.length();
+    controls.target.set(root.x, height * 0.5, root.z);
+    camera.position.copy(controls.target).addScaledVector(direction, distance);
+    zoom.target = camera.position.distanceTo(controls.target);
+    state.prevRoot.copy(root);
+    controls.update();
+    updateOrthographic();
+    invalidate();
+  }
+
+  function resetView() {
+    frameView(camera.position.clone().sub(controls.target).normalize());
+  }
+
+  function frameDefaultView() {
+    clearOrbitInertia();
+    setProjection(perspective);
+    frameView(frontDirection);
+  }
+
+  // On loop: move camera + target back with the body, keeping the user's zoom and angle.
+  function recenterOnFrame(f) {
+    const root = frameRoot(f);
+    const delta = root.clone().sub(state.prevRoot);
+    camera.position.add(delta);
+    controls.target.add(delta);
+    state.prevRoot.copy(root);
+  }
+
+  // ---------------------------------------------------------------- video sync
+  const syncToggle = $("optSync");
+  const media = { time: NaN, lastMove: 0, retried: false, fallback: false, play: null };
+  const mediaEnabled = () => state.meta && syncToggle.checked && !!video.getAttribute("src");
+  const resetMediaWatch = () => { media.time = NaN; media.lastMove = performance.now(); };
+  const videoTimeFor = (f) => clock.timeOf((state.meta.track_start || 0) + f + 0.5, state.meta.fps);
+  const videoFrame = () => clock.frameAt(video.currentTime, state.meta.fps) - (state.meta.track_start || 0);
+  function playVideo() {
+    if (!video.paused || media.play) return;
+    const pending = media.play = video.play();
+    pending.catch(() => {}).finally(() => { if (media.play === pending) media.play = null; });
+  }
+
+  function seekVideo(frame) {
+    const time = videoTimeFor(frame);
+    video.currentTime = Number.isFinite(video.duration) ? Math.min(time, video.duration) : time;
+    resetMediaWatch();
+  }
+
+  function syncVideo(force) {
+    if (!mediaEnabled() || media.fallback || video.readyState < 1 || !clock.ready) return;
+    const different = Math.abs(video.currentTime - videoTimeFor(state.frame));
+    if (state.playing) {
+      video.playbackRate = state.speed;
+      if (force || different > 0.15) seekVideo(state.frame);
+      playVideo();
+    } else {
+      if (!video.paused) video.pause();
+      if (force || different > 0.02) seekVideo(state.frame);
+    }
+  }
+
+  function resetMediaSync() {
+    if (media.fallback) preview.showPreviewIssue("");
+    media.fallback = media.retried = false;
+    resetMediaWatch();
+  }
+
+  function setPlaying(p, driveVideo = true) {
+    if (state.playing !== p) {
+      state.lastT = 0;
+      if (p) state.playbackPosition = Math.max(0, state.frame);
+      resetMediaWatch();
+    }
+    state.playing = p;
+    if (!p && state.meta && state.frame >= 0) setFrame(state.frame);
+    renderFrameCounter();
+    $("iconPlay").classList.toggle("hidden", p);
+    $("iconPause").classList.toggle("hidden", !p);
+    if (driveVideo) syncVideo(true);
+    invalidate();
+  }
+
+  video.addEventListener("flowhmr:sourcechanging", ({ detail }) => {
+    media.play = null;
+    if (!detail.retry) resetMediaSync(); else resetMediaWatch();
+  });
+  video.addEventListener("flowhmr:clockready", () => syncVideo(true));
+  // Browsers without requestVideoFrameCallback use the zero-origin clock.
+  video.addEventListener("loadedmetadata", () => syncVideo(true));
+  video.addEventListener("play", () => {
+    if (!mediaEnabled() || !clock.ready || video.paused || state.playing) return;
+    resetMediaSync();
+    const next = videoFrame();
+    if (next < 0 || next >= state.meta.num_frames) {
+      setFrame(0);
+      seekVideo(0);
+    } else setFrame(next);
+    video.playbackRate = state.speed;
+    setPlaying(true, false);
+  });
+  video.addEventListener("pause", () => {
+    if (!mediaEnabled() || media.fallback || !video.paused || video.error || video.ended
+        || !state.playing || !clock.ready) return;
+    setFrame(videoFrame());
+    setPlaying(false, false);
+  });
+  video.addEventListener("seeked", () => {
+    if (mediaEnabled() && !state.playing && clock.ready) setFrame(videoFrame());
+  });
+
+  $("btnPlay").onclick = () => {
+    if (!state.meta) return;
+    if (!state.playing) {
+      resetMediaSync();
+      if (state.frame >= state.meta.num_frames - 1) setFrame(0);
+    }
+    setPlaying(!state.playing);
+  };
+  function jumpTo(frame) {
+    if (!state.meta) return;
+    setFrame(frame);
+    setPlaying(false);
+  }
+  scrub.addEventListener("input", (e) => jumpTo(Number(e.target.value)));
+  for (const button of frameButtons) {
+    button.onclick = () => jumpTo({
+      first: 0, previous: state.frame - 1, next: state.frame + 1, last: state.meta.num_frames - 1,
+    }[button.dataset.frameAction]);
+  }
+  const speedSelect = $("speed");
+  const savedSpeed = localStorage.getItem("flowhmr-playback-speed");
+  if ([...speedSelect.options].some((option) => option.value === savedSpeed)) {
+    speedSelect.value = savedSpeed;
+    state.speed = Number(savedSpeed);
+  }
+  speedSelect.onchange = () => {
+    state.speed = Number(speedSelect.value);
+    localStorage.setItem("flowhmr-playback-speed", speedSelect.value);
+    syncVideo(true);
+  };
+  $("btnReset").onclick = resetView;
+  rememberToggle($("optFollow"), "flowhmr-follow");
+  rememberToggle(syncToggle, "flowhmr-sync-video", (enabled) => {
+    resetMediaSync();
+    if (enabled) syncVideo(true); else video.pause();
+  });
+  const audioToggle = $("optAudio");
+  const saveAudio = rememberToggle(audioToggle, "flowhmr-original-audio", (enabled) => { video.muted = !enabled; });
+  video.muted = !audioToggle.checked;
+  video.addEventListener("volumechange", () => {
+    // Person selection mutes its looping preview temporarily.
+    if (preview.temporaryMute) return;
+    audioToggle.checked = !video.muted;
+    saveAudio();
+  });
+  window.addEventListener("keydown", (e) => {
+    const target = e.target;
+    if (e.defaultPrevented || e.isComposing || !(target instanceof Element)) return;
+    if (e.code === "Space") {
+      const timelineControl = target.matches('.timeline-editor input[type="range"], #controls .transport, #btnPlay');
+      if (!state.meta || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || target.isContentEditable
+          || document.querySelector("dialog:modal")
+          || (!timelineControl && target.closest("input, select, textarea, button, summary, a[href]"))) return;
+      e.preventDefault();
+      if (!e.repeat) $("btnPlay").click();
+      return;
+    }
+    if (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+    if (e.code === "Numpad1") { e.preventDefault(); setView(e.ctrlKey ? "back" : "front"); }
+    if (e.code === "Numpad3") { e.preventDefault(); setView(e.ctrlKey ? "left" : "right"); }
+    if (e.code === "Numpad7") { e.preventDefault(); setView(e.ctrlKey ? "bottom" : "top"); }
+    if (e.code === "Numpad5") { e.preventDefault(); toggleProjection(); }
+    if (e.code === "Home") { e.preventDefault(); resetView(); }
+    if (!state.meta) return;
+    if (e.code === "ArrowRight") { e.preventDefault(); jumpTo(state.frame + 1); }
+    if (e.code === "ArrowLeft") { e.preventDefault(); jumpTo(state.frame - 1); }
+  });
+
+  function tickMedia(t) {
+    if (clock.ready && video.readyState >= 1 && !video.seeking && (!video.paused || video.ended)) {
+      const time = video.currentTime;
+      if (!Number.isFinite(media.time) || Math.abs(media.time - time) > .001) {
+        media.time = time;
+        media.lastMove = t;
+      }
+      const next = videoFrame();
+      if (video.ended || next >= state.meta.num_frames) {
+        if ($("optFollow").checked) recenterOnFrame(0);
+        setFrame(0);
+        seekVideo(0);
+        playVideo();
+        return;
+      }
+      if (next >= 0) {
+        const position = clock.positionAt(time, state.meta.fps) - (state.meta.track_start || 0) - 0.5;
+        setFrame(position, next);
+      }
+    }
+    // A stalled decoder can report paused=false indefinitely. Give the same
+    // source one fresh load at the current frame, then keep the motion usable.
+    if (t - media.lastMove < 1200) return;
+    if (!media.retried && preview.retryPlayback()) {
+      media.retried = true;
+      return;
+    }
+    media.fallback = true;
+    video.pause();
+    preview.showPreviewIssue(m("source.sync_stalled"));
+  }
+
+  let sourceFrameBounds = null;
+  function updateSourceFrameBounds(rect) {
+    if (rect === sourceFrameBounds) return;
+    if (rect && sourceFrameBounds && rect.every((value, index) => value === sourceFrameBounds[index])) return;
+    sourceFrameBounds = rect;
+    if (rect) {
+      const [left, bottom, width, height] = rect;
+      Object.assign(sourceFrameOverlay.style, { left: `${left}px`, bottom: `${bottom}px`,
+        width: `${width}px`, height: `${height}px` });
+    }
+    show(sourceFrameOverlay, !!rect);
+  }
+
+  function tick(t) {
+    renderRequest = 0;
+    const dt = state.lastT ? (t - state.lastT) / 1000 : 0;
+    state.lastT = t;
+    if (state.playing && state.meta) {
+      if (mediaEnabled() && !media.fallback) tickMedia(t);
+      else {
+        const advanced = state.playbackPosition + dt * state.meta.fps * state.speed;
+        const frames = state.meta.num_frames, next = advanced % frames;
+        if (advanced >= frames && $("optFollow").checked) recenterOnFrame(next);
+        // setFrame holds the final pose while retaining its full clock interval.
+        setFrame(next);
+      }
+    }
+    const zooming = !sourceView && applyZoom();
+    const orbiting = !sourceView && controls.update();
+    if (dirty) {
+      dirty = false;
+      const d = camera.position.distanceTo(controls.target);
+      scene.fog.near = sourceView ? 100000 : d + 6;
+      scene.fog.far = sourceView ? 100001 : d + 30;
+      renderer.setScissorTest(false);
+      const width = container.clientWidth, height = container.clientHeight;
+      const rect = sourceView && sourceFrameValid ? sourceViewport(width, height, cameraData.image_size_hw) : null;
+      updateSourceFrameBounds(rect);
+      renderer.setViewport(0, 0, width, height);
+      if (sourceView) {
+        renderer.clear();
+        if (rect) {
+          renderer.setViewport(...rect);
+          renderer.setScissor(...rect);
+          renderer.setScissorTest(true);
+          renderer.render(scene, camera);
+          renderer.setScissorTest(false);
+        }
+      } else renderer.render(scene, camera);
+    }
+    if (state.playing || zooming || orbiting) {
+      if (!renderRequest) renderRequest = requestAnimationFrame(tick);
+    } else state.lastT = 0;
+  }
+
+  // ---------------------------------------------------------------- public API
+  function characterBones({asset,mesh,poseOffsets}) {
+    if(asset.kind==="pmx") return mesh.skeleton.bones;
+    const target=asset.getRig(mesh);
+    return poseOffsets?.retarget ? target.manualBones??target.bones : target.bones;
+  }
+  function labelBody() {
+    const custom = sourceBodyPreview() ? 0 : actors.filter((actor) => actor.character).length;
+    const asset = sourceBodyPreview() ? null : character.active;
+    setText($("viewportObject"), () => [
+      t("view.scene"),
+      [state.scene ? t("person.count", { count: actors.length }) : "",
+        ...(custom > 1 ? [t("character.custom_count", { count: custom })]
+          : asset ? [({ mixamo: "Mixamo", metahuman: "MetaHuman", vrm: "VRM",custom:"FBX" })[asset.profile] ?? "PMX", asset.name]
+            : ["SMPL-H", t(`view.${state.bodyVariant}`)])].filter(Boolean).join(" · "),
+    ].join(" | "));
+  }
+
+  async function loadActor(person, variant, signal) {
+    const [meta, vertices, faces] = await Promise.all([
+      api.getMeta(person.id, signal), api.getVertices(person.id, signal, variant), api.getFaces(person.id, signal),
+    ]);
+    if (!meta.num_frames || vertices.byteLength !== meta.num_frames * meta.num_vertices * 6
+        || faces.byteLength !== meta.num_faces * 12 || (person.start != null &&
+          (sourceStart(meta) !== person.start || person.end - person.start + 1 !== meta.num_frames))) {
+      throw appError("view.mesh_incomplete");
+    }
+    return { person, meta, vertices, faces };
+  }
+
+  function addActor({ person, meta, vertices, faces }, multiple) {
+    const geometry = new THREE.BufferGeometry();
+    for (const key of ["position", "normal"]) {
+      geometry.setAttribute(key, new THREE.BufferAttribute(new Float32Array(meta.num_vertices * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    }
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(faces), 1));
+    const material = multiple ? bodyMat.clone() : bodyMat;
+    if (multiple) material.color.lerp(new THREE.Color(personColor(person.person - 1)), 0.28);
+    const body = new THREE.Mesh(geometry, material);
+    body.name = "motion-skin";
+    body.castShadow = true;
+    body.frustumCulled = false;
+    const group = new THREE.Group();
+    const yaw = person.yaw ?? 0;
+    group.rotation.y = yaw;
+    group.position.fromArray(person.offset ?? [0, 0, 0]);
+    group.name = multiple ? `person-${person.person}` : "motion-actor";
+    group.add(body);
+    scene.add(group);
+    return { id: person.id, number: person.person, meta, verts: new Uint16Array(vertices), body, group, skeleton: null, character: null,
+      sceneTrack: { ...person, visible_ranges: person.visible_ranges ?? meta.visible_ranges,
+        yaw, offset: person.offset ?? [0, 0, 0] },
+      cos: Math.cos(yaw), sin: Math.sin(yaw) };
+  }
+
+  function groupBounds() {
+    const bounds = new THREE.Box3();
+    const matrix = new THREE.Matrix4(), position = new THREE.Vector3();
+    for (const { meta, sceneTrack } of actors) {
+      const { bbox_min: a, bbox_max: b } = meta;
+      for (const { yaw, offset } of sceneTrack.placements ?? [sceneTrack]) {
+        matrix.makeRotationY(yaw).setPosition(position.fromArray(offset));
+        for (const x of [a[0], b[0]]) for (const y of [a[1], b[1]]) for (const z of [a[2], b[2]]) {
+          bounds.expandByPoint(new THREE.Vector3(x, y, z).applyMatrix4(matrix));
+        }
+      }
+    }
+    return { bbox_min: bounds.min.toArray(), bbox_max: bounds.max.toArray() };
+  }
+
+  bodySelect.addEventListener("change", async () => {
+    const selected = bodySelect.value;
+    if (!state.meta) {
+      localStorage.setItem(BODY_STORAGE, selected);
+      return;
+    }
+    bodyController?.abort();
+    const change = bodyController = new AbortController();
+    const jobId = state.jobId;
+    bodySelect.disabled = true;
+    setText($("viewportObject"), m("view.body_loading", { body: m(`view.${selected}`) }));
+    try {
+      const vertices = await Promise.all(actors.map((a) => api.getVertices(a.id, change.signal, selected)));
+      if (change.signal.aborted || state.jobId !== jobId) return;
+      if (vertices.some((data, i) => data.byteLength !== actors[i].meta.num_frames * actors[i].meta.num_vertices * 6)) {
+        throw appError("view.body_incomplete");
+      }
+      vertices.forEach((data, i) => { actors[i].verts = new Uint16Array(data); });
+      state.bodyVariant = selected;
+      localStorage.setItem(BODY_STORAGE, selected);
+      for (const actor of actors) drawActorFrame(actor, state.visualFrame);
+      invalidate();
+      labelBody();
+    } catch (error) {
+      if (change.signal.aborted || state.jobId !== jobId) return;
+      bodySelect.value = state.bodyVariant;
+      setText($("viewportObject"), m("view.body_failed", { detail: error }));
+    } finally {
+      if (bodyController === change) { bodyController = null; bodySelect.disabled = false; }
+    }
+  });
+
+  return {
+    controlPlayback(command) {
+      if (!state.meta || state.frame < 0) return { error: 'No motion is loaded in this viewer.' };
+      if (state.jobId !== command.job_id) return { error: 'The viewer is displaying a different job.' };
+      if (command.action === 'seek') {
+        if (!Number.isInteger(command.frame) || command.frame < 0 || command.frame >= state.meta.num_frames)
+          return { error: 'Frame is outside the loaded motion.' };
+        jumpTo(command.frame);
+      } else if (command.action === 'play') {
+        if (!state.playing) {
+          resetMediaSync();
+          if (state.frame >= state.meta.num_frames - 1) setFrame(0);
+          setPlaying(true);
+        }
+      } else if (command.action === 'pause') setPlaying(false);
+      else return { error: 'Unknown playback action.' };
+      return { job_id: state.jobId, action: command.action, frame: state.frame,
+        display_frame: (state.scene ? sourceStart(state.meta) : 0) + state.frame + 1,
+        source_frame: sourceStart(state.meta) + state.frame, frame_count: state.meta.num_frames,
+        fps: state.meta.fps, playing: state.playing };
+    },
+    snapshot() {
+      if (!state.meta || state.frame < 0) return { available: false, reason: 'no_motion_loaded' };
+      return {
+        available: true, job_id: state.jobId, frame: state.frame,
+        display_frame: (state.scene ? sourceStart(state.meta) : 0) + state.frame + 1,
+        source_frame: sourceStart(state.meta) + state.frame,
+        fps: state.meta.fps, playing: state.playing, frame_count: state.meta.num_frames,
+        actors: actors.map((actor) => {
+          const frame = actorFrame(actor, state.frame);
+          const active = frame >= 0 && frame < actor.meta.num_frames
+            && sceneActorVisible(actor.sceneTrack, sourceStart(state.meta) + state.frame);
+          const source = actor.skeleton && active ? {
+            index_space: 'SMPL-H source joint order',
+            joints: actor.skeleton.parents.map((parent, index) => ({ index, parent,
+              position: Array.from(actor.skeleton.joints.subarray(frame * actor.skeleton.stride + index * 3,
+                frame * actor.skeleton.stride + index * 3 + 3)) })),
+            coordinate_space: 'actor local', units: 'metres',
+          } : null;
+          let target = null;
+          if (actor.character && active) {
+            const { asset, mesh, rig } = actor.character;
+            // MCP reports an exact source frame even during interpolated playback.
+            const changed = actorFrame(actor, state.visualFrame) !== frame;
+            if (changed || !mesh.visible) rig.apply(frame);
+            const bones = characterBones(actor.character);
+            actor.group.updateWorldMatrix(true, true);
+            target = { kind: asset.kind, character_id: actor.character.libraryId, visible: mesh.visible,
+              index_space: asset.kind === 'pmx' ? 'PMX skeleton bone order' :
+                asset.kind === 'fbx' ? 'FBX preview rig bone order (skin order followed by ancestors)' :
+                  'VRM preview rig order (not original glTF node indices)',
+              local_transform: 'relative to actual scene parent', world_transform: 'Three.js scene world',
+              quaternion_order: 'xyzw', translation_units: 'metres in scene world',
+              bones: bones.map((bone, index) => {
+                const worldPosition = new THREE.Vector3(), worldQuaternion = new THREE.Quaternion();
+                bone.getWorldPosition(worldPosition); bone.getWorldQuaternion(worldQuaternion);
+                const parentIndex = bones.indexOf(bone.parent);
+                return { index, name: bone.name, parent_index: parentIndex < 0 ? null : parentIndex,
+                  parent_name: bone.parent?.name ?? null, local_position: bone.position.toArray(),
+                  local_quaternion: bone.quaternion.toArray(), local_scale: bone.scale.toArray(),
+                  world_position: worldPosition.toArray(), world_quaternion: worldQuaternion.toArray() };
+              }) };
+            const visibleFrame = actorFrame(actor, state.visualFrame);
+            if (changed && actor.group.visible) rig.apply(visibleFrame);
+          }
+          return { actor_id: actor.id, person_id: actor.number ?? null, active,
+            frame: active ? frame : null, source_skeleton: source, character_skeleton: target };
+        }),
+      };
+    },
+    openCharacter(person) {
+      const actor = person == null ? null : actors.find((a) => String(a.number) === String(person));
+      return character.open(actor?.id);
+    },
+    getFbxActor(people, profile) {
+      if (state.scene && people.length !== 1) return null;
+      const actor = state.scene ? actors.find((a) => String(a.number) === String(people[0])) : actors[0];
+      const entry = actor?.character;
+      if (entry?.asset.kind !== "fbx" || (profile === "retarget_fbx"
+        ? entry.asset.profile === "custom" && !entry.poseOffsets?.retarget
+        : entry.asset.profile !== profile)) return null;
+      return { asset:entry.asset, libraryId:entry.libraryId, motion:entry.motion, poseOffsets:entry.poseOffsets,
+        sceneTrack:actor.sceneTrack, sourceStart:sourceStart(actor.meta) };
+    },
+    getRetargetActors(people) {
+      const selected = new Set(people.map(String));
+      const group = actors.filter((actor) => !state.scene || selected.has(String(actor.number)));
+      if (!group.length || (state.scene && group.length !== selected.size) ||
+          group.some((a) => !a.character?.poseOffsets?.retarget || a.character.asset.kind !== "vrm")) return [];
+      return group.map((a) => ({
+        ...a.character, person:a.number, fps:a.meta.fps,
+        start:state.scene ? sourceStart(a.meta)-sourceStart(state.meta) : 0,
+        frames:state.meta.num_frames,
+        sceneTrack:a.sceneTrack, sourceStart:sourceStart(state.meta),
+      }));
+    },
+    getPmxActors(people) {
+      const group = this.getVmdActors(people);
+      return group.every((actor) => actor.asset?.kind === "pmx") ? group : [];
+    },
+    getVmdActors(people) {
+      const selected = new Set(people.map(String));
+      const targets = actors.filter((actor) => !state.scene || selected.has(String(actor.number)));
+      if (state.scene && targets.length !== selected.size) return [];
+      return targets.map((actor) => ({
+        id: actor.id,
+        person: actor.number,
+        start: state.scene ? sourceStart(actor.meta) : 0,
+        sceneEnd: state.scene ? sourceStart(state.meta) + state.meta.num_frames - 1 : null,
+        fps: actor.meta.fps,
+        sceneTrack: actor.sceneTrack,
+        asset: actor.character?.asset,
+        motion: actor.character?.motion,
+        cameraStart: sourceStart(actor.meta),
+        poseOffsets: actor.character?.poseOffsets,
+      }));
+    },
+    setBodyVariants(names = ["neutral"], preferred = "neutral") {
+      const available = new Set(names);
+      for (const option of bodySelect.options) option.disabled = !available.has(option.value);
+      const saved = state.meta ? state.bodyVariant : localStorage.getItem(BODY_STORAGE);
+      bodySelect.value = available.has(saved) ? saved : available.has(preferred) ? preferred : names[0] ?? "";
+      show("bodyVariantRow", available.size > 1);
+      if (state.meta && bodySelect.value && bodySelect.value !== state.bodyVariant) {
+        bodySelect.dispatchEvent(new Event("change"));
+      }
+    },
+    get bodyVariant() { return state.meta ? state.bodyVariant : bodySelect.value || "neutral"; },
+    seekSourceFrame(frame) {
+      const first = state.meta?.track_start ?? 0;
+      if (state.meta && frame >= first && frame < first + state.meta.num_frames) jumpTo(frame - first);
+      else if (clock.ready && video.readyState >= 1) {
+        setPlaying(false, false);
+        video.pause();
+        video.currentTime = Math.min(video.duration, clock.timeOf(frame + 0.5));
+      }
+    },
+    async load(jobId, groupScene = null, job = {}) {
+      if (sourceView) setProjection(orbitCamera);
+      cameraData = null;
+      sourceCamera.select(jobId, job, false);
+      loadController?.abort();
+      bodyController?.abort();
+      bodyController = null;
+      bodySelect.disabled = true;
+      const load = loadController = new AbortController();
+      const members = groupScene?.people ?? [{ id: jobId }];
+      const inspections = members.map((p) => api.getInspection(p.id, load.signal).catch(() => null));
+      let variant = bodySelect.value || "source";
+      let data;
+      try {
+        data = await Promise.all(members.map((p) => loadActor(p, variant, load.signal))).catch((error) => {
+          if (load.signal.aborted || variant === "source") throw error;
+          variant = "source";
+          return Promise.all(members.map((p) => loadActor(p, variant, load.signal)));
+        });
+      } catch (error) {
+        if (load.signal.aborted) return null;
+        load.abort();
+        loadController = null;
+        bodySelect.disabled = false;
+        throw error;
+      }
+      if (load.signal.aborted) return null;
+      removeActors();
+      actors = data.map((entry) => addActor(entry, !!groupScene));
+      const meta = groupScene ? { ...groupScene, ...groupBounds() } : actors[0].meta;
+      if (groupScene?.shot_ranges) {
+        meta.shot_ids = new Int32Array(meta.num_frames);
+        for (const [id, [start, end]] of groupScene.shot_ranges.entries()) {
+          meta.shot_ids.fill(id, start - meta.track_start, end - meta.track_start);
+        }
+      }
+      state.jobId = jobId;
+      state.meta = meta;
+      state.scene = groupScene;
+      state.frame = -1;
+      state.visualFrame = -1;
+      state.playbackPosition = 0;
+      state.lastT = 0;
+      resetMediaSync();
+      state.bodyVariant = bodySelect.value = variant === "source"
+        ? groupScene?.body_reference ?? data[0].meta.body_reference ?? "neutral" : variant;
+      bodySelect.disabled = false;
+      syncSkeletonDisplay();
+
+      setTimeline(meta.num_frames);
+      show("viewerEmpty", false);
+      show("viewerTools", true);
+      show("groundMenu", true);
+      if (groupScene) {
+        estimatedGround = { height_m: groupScene.ground_m, source: "shared" };
+        syncGround();
+      } else setText($("groundSource"), m("view.ground_pending"));
+      setText($("resultInfo"), () => [
+        groupScene ? t("person.count", { count: actors.length }) : "",
+        t("view.duration", { frames: meta.num_frames, seconds: (meta.num_frames / meta.fps).toFixed(1) }),
+      ].filter(Boolean).join(" · "));
+      setAttr($("resultInfo"), "title", m("timeline.source_span", {
+        start: (meta.track_start || 0) + 1, end: (meta.track_start || 0) + meta.num_frames,
+      }));
+      labelBody();
+      setFrame(0);
+      frameDefaultView();
+      setPlaying(false);
+      updateSourceAvailability();
+      sourceCamera.preparePreview();
+      void character.showForJob();
+      void Promise.all(inspections).then((results) => {
+        if (!load.signal.aborted && state.jobId === jobId) results.forEach((info, i) => setInspection(actors[i], info));
+        if (loadController === load) loadController = null;
+      });
+      return meta;
+    },
+    updateCameraStatus(job) { sourceCamera.update(job); },
+    clear() {
+      if (sourceView) setProjection(orbitCamera);
+      cameraData = null;
+      sourceCamera.select(null);
+      loadController?.abort();
+      loadController = null;
+      bodyController?.abort();
+      bodyController = null;
+      bodySelect.disabled = false;
+      state.jobId = null; state.meta = null; state.scene = null;
+      removeActors();
+      syncSkeletonDisplay();
+      estimatedGround = null;
+      groundAuto.checked = true;
+      syncGround();
+      $("groundMenu").open = false;
+      show("groundMenu", false);
+      video.pause();
+      setPlaying(false);
+      renderer.shadowMap.needsUpdate = true;
+      show("viewerEmpty", true);
+      show("viewerTools", false);
+      show("dlNpz", false);
+      show("dlFbx", false);
+      $("menuNpz").disabled = $("menuFbx").disabled = true;
+      setTimeline(0);
+      setText($("viewportObject"), m("view.scene"));
+      setText($("resultInfo"), "");
+      setAttr($("resultInfo"), "title", "");
+      frameDefaultView();
+    },
+    setStatus(text) { if (!state.meta) setText($("viewerEmpty"), text); },
+    // Playback shortcuts ignore focused controls, so a click on a history row must
+    // hand focus back to the viewport instead of leaving it on that button.
+    focus() { container.focus({ preventScroll: true }); },
+    get jobId() { return state.jobId; },
+  };
+}

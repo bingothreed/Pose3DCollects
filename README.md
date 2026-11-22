@@ -47,19 +47,19 @@ The **EN / 中** button in the top bar switches between Chinese and English, and
 
 ## First-Time Engine Setup
 
-Open **Settings & Resources** at the top; the page only shows the engine currently selected in the top bar. Switch between **InstantHMR / FlowHMR** in the top bar to view the other engine's environment, models, and settings.
+Open **Settings & Resources** at the top; the page only shows the engine currently selected in the top bar. Switch engines in the top bar to view its environment, models and settings. Model directories default to the vendored engine folders and stay editable; each model folder contains a tracked `README.md` describing the expected files.
 
 ### InstantHMR
 
-These locations are detected automatically by default (editable in the cards):
+InstantHMR is vendored in this checkout; the runner, environment and models live together:
 
 | Item | Default |
 |---|---|
-| Project directory | `..\InstantHMR` |
+| Project directory | `engines\instanthmr` |
 | Virtual environment | `<project>\.venv\Scripts\python.exe` |
 | Model directory | `<project>\models` |
 
-1. Click **Auto Setup Environment**: creates `.venv`, runs `pip install -r requirements.txt`, and verifies runtime dependencies.
+1. Click **Auto Setup Environment**: creates `.venv`, installs CUDA 12.6 PyTorch (from the Aliyun mirror; CPU PyTorch when no NVIDIA GPU is found), runs `pip install -r requirements.txt`, and verifies runtime dependencies. Requires Python 3.12.
 2. In the model table, choose the default model and fitting method (defaults: `medium` + `fit2`), then click **Download**: fetches `instanthmr-<size>-fit<fit>.onnx` and `mhr-body.onnx` from Hugging Face.
 3. Wait until the status becomes **Ready**.
 
@@ -71,20 +71,19 @@ Alternatively, place the model files in the model directory manually, then click
 
 ### FlowHMR
 
-The **FlowHMR-Windows portable build** (`..\FlowHMR-Windows\FlowHMR`) is preferred by default — it ships with its own Python runtime and model management:
+The FlowHMR-Windows **source** is vendored under `engines\flowhmr`; its runtime (Python 3.10 + PyTorch) is created locally and its models are downloaded into the same folder:
 
 | Item | Default |
 |---|---|
-| Project directory | `..\FlowHMR-Windows\FlowHMR` |
-| Python | `<project>\runtime\python.exe` |
+| Project directory | `engines\flowhmr` |
+| Python | `<project>\.venv\Scripts\python.exe` (Python 3.10) |
 | Port | `60550` |
 | Model directory | `<project>\models` |
 
-- The settings page marks where files should go with the **Model Root**; you can copy the path or open/create the folder directly, and each model row has an **Open Folder** action. Manually downloaded models just need to be placed at the full path shown in the row.
-- The portable build already includes its environment; clicking **Auto Setup Environment** reuses FlowHMR's built-in runtime manager to automatically select, download, and enable the PyTorch inference runtime for your GPU (NVIDIA CUDA / AMD ROCm / Intel XPU / CPU, with resume support and SHA-256 verification). If the runtime is already ready, it only runs checks; switching runtimes automatically restarts the FlowHMR service.
-- If models are missing, click **Download Public Models**, which calls FlowHMR's built-in download script (with SHA-256 verification).
+- The settings page marks where files should go with the **Model Root**; you can copy the path or open/create the folder directly, and each model row has an **Open Folder** action. Manually downloaded models just need to be placed at the full path shown in the row. Changing the model directory takes effect after restarting the FlowHMR service.
+- Clicking **Auto Setup Environment** creates a Python 3.10 `.venv`, pre-installs PyTorch/torchvision 2.8.0+cu128 from the Aliyun mirror, then installs `requirements-windows.txt`, the web/perception dependencies and YOLOX. No portable `runtime\` folder is required.
+- If models are missing, click **Download Public Models**, which calls FlowHMR's built-in download script (with SHA-256 verification); the full set is about 20 GB.
 - Body model packs that require login/authorization (MANO / SMPL-H) must be downloaded manually per FlowHMR's `models/README.md`; place them in the corresponding directories, then click **Save & Detect**.
-- You can also set the project directory to the upstream `flowhmr` repository in settings; if there is no `runtime`, **Auto Setup Environment** creates a `.venv` and installs upstream dependencies (including PyTorch, a very large download). Upstream models must be prepared per `docs/install.md`.
 
 The service starts automatically when you submit your first FlowHMR job; the first start loads models and may take several minutes. Service logs are at `data/logs/flowhmr-server.log`.
 
@@ -94,7 +93,7 @@ GEM-X ([NVIDIA](https://github.com/nv-tlabs/GEM-X)) runs **Body Pose** framewise
 
 | Item | Default |
 |---|---|
-| Project directory | `..\GEM-X` |
+| Project directory | `engines\gemx` |
 | Python | `<project>\.venv\Scripts\python.exe` |
 | Weights directory | `<project>\weights` |
 | SOMA assets | `<project>\assets\soma` |
@@ -139,14 +138,17 @@ HMRCollects/
 ├─ start.bat              One-click environment + browser launch
 ├─ start-desktop.bat      One-click environment + standalone window launch
 ├─ requirements-desktop.txt  Optional pywebview dependency
+├─ engines/                Vendored engine sources (models/venvs ignored)
+│  ├─ instanthmr/          InstantHMR package + demo.py
+│  ├─ flowhmr/             FlowHMR application source + third_party
+│  ├─ gemx/                GEM-X package + packaging files
+│  └─ tdpt/                TDPT VNect runner + demo.py
 ├─ hub/
-│  ├─ config.py           Configuration and project auto-discovery
+│  ├─ config.py           Configuration and embedded engine paths
 │  ├─ engines.py          Engine readiness checks, environment/model install tasks
 │  ├─ flow_server.py      FlowHMR service lifecycle + HTTP client
-│  └─ jobs.py             Unified job model, InstantHMR worker scheduling
-├─ workers/
-│  ├─ instanthmr_worker.py         Runs inference in the InstantHMR environment, outputs a unified result package
-│  └─ download_instanthmr_models.py
+│  └─ jobs.py             Unified job model, engine worker scheduling
+├─ workers/               Unified result writers and model downloaders
 ├─ templates/index.html
 ├─ static/css/app.css
 ├─ static/js/             main / viewer / overlay / settings / api / state

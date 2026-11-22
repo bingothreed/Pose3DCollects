@@ -1,0 +1,96 @@
+# FlowHMR-Windows
+
+[简体中文](../../README.md) · [繁體中文](zh-TW.md) · **English** · [日本語](ja.md) · [한국어](ko.md) · [Русский](ru.md) · [Français](fr.md)
+
+**FlowHMR-Windows** is an application for capturing motion from video on your own computer. Import a video, select one or more people, and reconstruct their movements in 3D for synchronized preview and export. It uses the upstream [FlowHMR](https://github.com/flowhmr/flowhmr) model for motion reconstruction. This independently maintained repository provides the portable Windows edition, model and runtime management, and the desktop workflow from person selection through export.
+
+**[Download the portable Windows edition](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [Release notes](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [FlowHMR paper](https://arxiv.org/abs/2610.03691)
+
+## What's new in v0.3.8
+
+- **Portable updates.** Open **Check for updates** in an existing installation to read these notes and install the update. You can also import the official portable ZIP.
+- **Stitching and camera recovery fixes.** For single-person stitching with a moving camera, short detection gaps use boxes from the same shot and the actor’s heading is aligned at each cut. Camera recovery reuses the per-shot camera estimates and person observations from motion generation.
+- **Source camera recovery (experimental).** Recover, preview or recalculate the original camera after generating motion. Export a matching FBX, VMD or NPZ camera. Footage with zoom or dolly motion can use a recovered camera path and focal length. GeoCalib helps estimate ground tilt.
+- **Person stitching and scene alignment (experimental).** Join the same person's clips on one timeline, or confirm several people in order and align them in one scene. Local arm transitions use pose evidence close to the cut.
+- **Torso motion optimization.** An optional extra generation pass uses FlowHMR base to re-estimate pelvis, spine, neck and head rotations. The standard motion's foot positions and orientations serve as targets. Off by default.
+- **On-demand models.** The **Models** panel lists separate downloads for SAM 2.1 (experimental person crossing), FlowHMR base and GeoCalib.
+- **Distant previews and MCP.** Reduces skin flicker on affected characters at a distance. MCP can start, query and stop camera recovery and export motion with its matching camera.
+
+[Full release notes](../release-windows.md) · [Previous release: v0.3.7](../release-windows-v0.3.7.md)
+
+## System requirements and supported hardware
+
+| Component | Requirements and recommendations |
+| --- | --- |
+| OS | 64-bit Windows 10 or 11; Windows 11 recommended and required for AMD ROCm and Intel XPU. |
+| RAM | At least 16 GB. 32 GB or more recommended, especially for CPU and integrated graphics. Longer videos can need more. |
+| CPU-only mode | Intel / AMD x64. No GPU or VRAM required. 32 GB or more of system RAM recommended. |
+| VRAM (dedicated GPUs only) | Motion capture verified with 6 GB of VRAM. 8 GB or more recommended. |
+
+| Device | Runtime | Status |
+| --- | --- | --- |
+| NVIDIA GeForce RTX 50 | CUDA 12.8 | Verified |
+| NVIDIA GeForce RTX 30 / 40 | CUDA 12.1 | Verified |
+| NVIDIA GeForce RTX 20 | CUDA 12.1 | Experimental |
+| NVIDIA GeForce GTX 10 | CUDA 12.1 | Experimental |
+| AMD Radeon RX 9000 / 7000 | [ROCm](../amd-rocm.md) | Verified |
+| AMD Radeon RX 6000 | [ROCm](../amd-rocm.md) | Experimental |
+| AMD Radeon RX 5000 | [ROCm](../amd-rocm.md) | Experimental |
+| AMD Radeon integrated GPUs (including 740M / 760M / 780M and some 800M models) | [ROCm](../amd-rocm.md) | Experimental (9950X iGPU verified; fixed camera recommended) |
+| Intel Arc A / B and some Core Ultra Arc integrated GPUs | [Intel XPU](../windows.md) | Experimental (GPU runs SAM image encoding only) |
+| Intel / AMD x64 processors | [CPU only](../windows.md) | Verified (AMD Ryzen 9 9950X); Intel experimental |
+
+HaMeR finger refinement is unavailable in CPU mode and on Intel XPU. SAM still runs its built-in hand estimation.
+
+## Windows desktop edition
+
+- **Capture motion in one window.** Choose who to track and which frames to process, then view the source video and the 3D motion side by side. The timeline keeps playback, seeking and loops in sync. Play the original audio and switch between the skinned mesh and skeleton displays.
+- **Preview and export multiple people together.** Select several people in one video. The combined preview and FBX preserve their relative positions and when each person enters. Reopen previous jobs from the thumbnail history.
+- **Adjust the result to suit the footage.** Tune motion smoothing, foot contact correction and ground height. Enable HaMeR on a compatible GPU runtime for more detailed finger motion. Fixed camera is the default; use moving camera mode when the camera clearly rotates horizontally, tilts or rolls.
+- **Run locally.** Install the inference runtime and model files as needed. Models load when generation starts. Once set up, the app can process videos offline. The interface is available in 简体中文, 繁體中文, English, 日本語, 한국어, Русский and Français. It remembers your language after you close it.
+- **Motion export.** Export FBX for FlowHMR, Mixamo, MetaHuman or Maya AdvancedSkeleton, along with MMD VMD, VRM Animation (VRMA) and NPZ. Custom FBX export keeps the character’s original skeleton and saved motion corrections, with optional skin. A custom-mapped VRM can also export animated GLB with skin. FlowHMR and generic Mixamo FBX can include a skinned mesh or a T-pose or A-pose at frame **−1**. See the [export and retargeting guide](../retarget-export.md).
+- **Custom characters.** Preview PMX, VRM 0.x or 1.0, and skinned Mixamo or MetaHuman FBX. Assign a separate character to each person. Map joints, assign IK controllers, and adjust rotation and translation, or load and manage a saved preset.
+
+## Example videos
+
+Click a thumbnail to open its MP4. All four show the neutral SMPL-H body from an orthographic front view at 30 FPS, with synchronized original audio for the selected range.
+
+| Dribbling and dance steps | Dance |
+| --- | --- |
+| [![Dribbling and dance steps](../../assets/demos/01-ikun-thumb.png)](../../assets/demos/01-ikun-front.mp4) | [![Dance](../../assets/demos/02-selei-thumb.png)](../../assets/demos/02-selei-front.mp4) |
+| **Stage character motion** | **Gestures and steps** |
+| [![Stage character motion](../../assets/demos/03-test2-thumb.png)](../../assets/demos/03-test2-front.mp4) | [![Gestures and steps](../../assets/demos/04-test3-thumb.png)](../../assets/demos/04-test3-front.mp4) |
+
+To try the app yourself, use the repository's [sample footage](../../assets/example/example.mp4).
+
+## Quick start
+
+1. On 64-bit Windows 10 or 11, extract the entire `FlowHMR-Windows.zip` archive, open the extracted `FlowHMR` folder and double-click `FlowHMR.exe`. The base package includes Python, the desktop interface and the FBX export component.
+2. Open **Runtime** at the top right, then download and enable the environment for your device from the table above. Update your graphics driver if needed. CPU mode does not require a graphics driver.
+3. Open **Models** and choose **Download all public models** (下载全部公开模型), or download them one by one. The app verifies the files before putting them in `models/`. SAM 3D Body and VGGT-Omega come from ModelScope. If you don't need finger refinement, you can skip HaMeR when downloading individually. Use the table below for the official models that require sign-in.
+4. Drop a video into the app, select people and a frame range, then start generation. Preview the finished motion and export FBX, VMD, VRMA, or NPZ from the menu.
+
+The desktop app checks for updates in the background. Use **Check for updates…** next to the language selector to read release notes, install an update from a downloaded ZIP, or choose a previous version. The current version remains usable if GitHub is unreachable.
+
+### Which official model packages do I need?
+
+Sign in to the [official MANO downloads page](https://mano.is.tue.mpg.de/download.php). **In addition to the public models from the previous step, basic motion capture only needs one of the official packages below. If you already have `mano_v1_2.zip`, you do not need the neutral package.** If you install both packages, the app uses the neutral body by default.
+
+| Purpose | Download on the official page | Extract here for manual installation |
+| --- | --- | --- |
+| Neutral body model for basic motion capture | **Extended SMPL+H model** (AMASS), `smplh.tar.xz` | `models/body_models/smplh/` |
+| Male and female body models for basic motion capture; also includes the MANO files required for finger refinement | **Models & Code**, `mano_v1_2.zip` | `models/` |
+
+After downloading, choose **Models → Import model archive…** (模型 → 导入模型压缩包…) and select `mano_v1_2.zip` or `smplh.tar.xz` directly. The app extracts the archive, identifies the models and installs them in the right locations. It keeps the original archive and shows which model groups are ready or still missing files. If you already extracted the archive, choose **Import extracted folder…** (导入已解压文件夹…) instead.
+
+Finger refinement needs the MANO files from `mano_v1_2.zip` and the public **HaMeR** model. Download HaMeR from its own row or with **Download all public models**.
+
+For the full manual folder layout, download sources and model uses, see [Model files](../../models/README.md).
+
+## Help and project credits
+
+- [Windows usage, upgrades and building from source](../../docs/windows.md) · [Report an issue](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/issues/new)
+- [Maintaining interface translations](../../docs/localization.md)
+- [Official FlowHMR project page](https://flowhmr.github.io/) · [Upstream inference and training documentation](https://github.com/flowhmr/flowhmr#readme) · [Upstream citation](https://github.com/flowhmr/flowhmr#citation)
+
+Motion reconstruction is based on **FlowHMR: Physically Plausible Motion Capture from Video** by Zhanke Wang et al. For research use, please cite the [original paper](https://arxiv.org/abs/2610.03691). The FlowHMR source code uses the [Apache-2.0 license](../../LICENSE). Third-party components and models are distributed under their own terms; see `THIRD_PARTY_NOTICES.md` in the release package and the [upstream model card](https://huggingface.co/fafsaf1/flowhmr-0.46B).

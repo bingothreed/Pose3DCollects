@@ -174,13 +174,16 @@ export function populateForms() {
   $("#instantFit").value = String(inst.fit ?? 2);
   $("#instantDevice").value = inst.device || "auto";
   $("#instantCameraIndex").value = inst.camera_index ?? 0;
+  $("#instantProxy").value = inst.proxy || "";
 
   const flow = cfg.engines.flowhmr;
   $("#flowRoot").value = flow.root || "";
   $("#flowPython").value = flow.python || "";
   $("#flowPort").value = flow.port || 60550;
-  $("#flowBasePython").value = flow.base_python || "python";
+  $("#flowBasePython").value = flow.base_python || "py -3.10";
   $("#flowDevice").value = flow.device || "auto";
+  $("#flowProxy").value = flow.proxy || "";
+  $("#flowModelsDir").value = flow.models_dir || "";
 
   const gemx = cfg.engines.gemx;
   $("#gemxRoot").value = gemx.root || "";
@@ -195,6 +198,7 @@ export function populateForms() {
 
   const tdpt = cfg.engines.tdpt;
   $("#tdptCameraIndex").value = tdpt.camera_index ?? 0;
+  $("#tdptModelsDir").value = tdpt.models_dir || "";
   const modelSelect = $("#tdptModel");
   if (modelSelect) {
     const modelName = tdpt.model || "MobileNet3D3_6.onnx";
@@ -321,6 +325,8 @@ function renderFlow(status) {
     checkRow(t("settings.checks.project"), status.root_ok, shorten(status.root)),
     checkRow(t("settings.checks.runtime"), status.python_ok,
       status.env_kind === "bundled" ? t("settings.detail.bundled") : status.python_version || t("settings.detail.notCreated")),
+    checkRow(t("settings.checks.deps"), status.deps_ok !== false,
+      status.deps_ok !== false ? t("settings.detail.allReady") : t("settings.detail.someMissing")),
     runtime ? checkRow(t("settings.checks.inferenceRuntime"), runtime.installed,
       runtime.installed ? (runtime.label || runtime.selected || "—") : t("settings.runtime.missing")) : "",
     checkRow(t("settings.checks.layout"), status.core_models_ok,
@@ -505,6 +511,7 @@ async function saveTdpt(notify) {
   const payload = {
     engines: {
       tdpt: {
+        models_dir: $("#tdptModelsDir").value.trim(),
         model: $("#tdptModel").value,
         camera_index: Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0)),
         smooth: $("#tdptSmooth").value === "true",
@@ -571,8 +578,6 @@ async function saveGemx(notify) {
   const payload = {
     engines: {
       gemx: {
-        root: $("#gemxRoot").value.trim(),
-        python: $("#gemxPython").value.trim(),
         models_dir: $("#gemxModelsDir").value.trim(),
         soma_dir: $("#gemxSomaDir").value.trim(),
         device: $("#gemxDevice").value,
@@ -609,6 +614,7 @@ async function saveInstant(notify) {
         fit: Number($("#instantFit").value),
         device: $("#instantDevice").value,
         camera_index: Math.max(0, Math.trunc(Number($("#instantCameraIndex").value) || 0)),
+        proxy: $("#instantProxy").value.trim(),
       },
     },
   };
@@ -650,11 +656,10 @@ async function saveFlow(notify) {
   const payload = {
     engines: {
       flowhmr: {
-        root: $("#flowRoot").value.trim(),
-        python: $("#flowPython").value.trim(),
+        models_dir: $("#flowModelsDir").value.trim(),
         port: Number($("#flowPort").value),
-        base_python: $("#flowBasePython").value.trim(),
         device: $("#flowDevice").value,
+        proxy: $("#flowProxy").value.trim(),
       },
     },
   };

@@ -1,0 +1,3 @@
+# Base inference installation; setup.cfg is the dependency source of truth.
+# Training: pip install -e '.[train]'; benchmarks: pip install -e '.[eval]'.
+-e .

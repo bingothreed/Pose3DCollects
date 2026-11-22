@@ -1,0 +1,96 @@
+# FlowHMR-Windows
+
+[简体中文](../../README.md) · **繁體中文** · [English](en.md) · [日本語](ja.md) · [한국어](ko.md) · [Русский](ru.md) · [Français](fr.md)
+
+**FlowHMR-Windows** 是一款在本機執行的影片動作擷取軟體。匯入一般影片後，可選取一位或多位人物，重建他們的 3D 人體動作，並同步預覽與匯出。動作重建採用上游 [FlowHMR](https://github.com/flowhmr/flowhmr) 模型；本儲存庫獨立維護 Windows 可攜版、模型與執行環境管理，以及從選人到匯出的桌面工作流程。
+
+**[下載 Windows 可攜版](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [查看發行說明](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [FlowHMR 論文](https://arxiv.org/abs/2610.03691)
+
+## v0.3.8 更新
+
+- **可攜版更新。** 開啟上方的「檢查更新」，查看說明並下載安裝。也可手動匯入官方可攜 ZIP。
+- **本次修正。** 運動機位下的單人跨鏡接續在同一鏡頭內補上偵測框，並在剪接點對齊人物朝向。攝影機反求會重用生成階段的逐鏡機位與人物觀測資料。
+- **攝影機反求（實驗性）。** 動作完成後，可生成、預覽和重算原片機位，也可匯出與動作配對的 FBX、VMD 或 NPZ。可根據原片估計推拉與焦距，並用 GeoCalib 改善地面傾角。
+- **人物片段接續與場景對齊（實驗性）。** 可將同一人的鏡頭接到一條時間軸，也可依序確認多個人物並對齊到同一場景。腕肘過渡限於原片能提供姿態依據的切點附近。
+- **軀幹動作最佳化。** 預設關閉。開啟後會額外執行一次 FlowHMR base，重新估計骨盆、脊椎、頸部和頭部的轉動，並以標準動作的腳部位置與朝向為目標。
+- **模型按需下載。** SAM 2.1（人物交叉最佳化，實驗性）、FlowHMR base 和 GeoCalib 都可在「模型」面板逐項下載。
+- **遠景預覽與 MCP。** 改善部分角色拉遠後的蒙皮閃爍。MCP 可生成、查詢和停止攝影機反求，並匯出配對的動作與攝影機。
+
+[完整更新說明](../release-windows.md) · [上一版 v0.3.7](../release-windows-v0.3.7.md)
+
+## 最低配置與支援裝置
+
+| 項目 | 基準配置 | 建議配置 |
+| --- | --- | --- |
+| 系統 | 64 位元 Windows 10 / 11 | 64 位元 Windows 11（ROCm 與 Intel XPU 需要） |
+| 系統記憶體 | 最少 16 GB | 32 GB 以上，純 CPU 或內顯尤其建議；長片可能需要更多 |
+| 純 CPU 模式 | Intel / AMD x64，無需顯示卡或顯示記憶體 | 32 GB 以上系統記憶體 |
+| 顯示記憶體（僅獨立顯示卡） | 6 GB 已實測可執行 | 8 GB 以上 |
+
+| 裝置 | 執行環境 | 驗證狀態 |
+| --- | --- | --- |
+| NVIDIA GeForce RTX 50 | CUDA 12.8 | 已驗證 |
+| NVIDIA GeForce RTX 30 / 40 | CUDA 12.1 | 已驗證 |
+| NVIDIA GeForce RTX 20 | CUDA 12.1 | 實驗中 |
+| NVIDIA GeForce GTX 10 | CUDA 12.1 | 實驗中 |
+| AMD Radeon RX 9000 / 7000 | [ROCm](../amd-rocm.md) | 已驗證 |
+| AMD Radeon RX 6000 | [ROCm](../amd-rocm.md) | 實驗中 |
+| AMD Radeon RX 5000 | [ROCm](../amd-rocm.md) | 實驗中 |
+| AMD Radeon 內顯（含 740M / 760M / 780M 與部分 800M） | [ROCm](../amd-rocm.md) | 實驗中（9950X 內顯已驗證；建議固定機位） |
+| Intel Arc A / B 與部分 Core Ultra Arc 內顯 | [Intel XPU](../windows.md) | 實驗中（GPU 僅負責 SAM 影像編碼） |
+| Intel / AMD x64 處理器 | [純 CPU](../windows.md) | 已驗證（AMD Ryzen 9 9950X）；Intel 實驗中 |
+
+純 CPU 和 Intel XPU 暫不支援 HaMeR 手指精修，SAM 內建的手部估計仍會執行。
+
+## Windows 桌面版
+
+- **匯入影片，在同一個視窗完成動作擷取。** 選取要處理的人物和影格範圍，生成後並排查看原始影片和 3D 動作。時間軸支援同步播放、拖曳定位和循環，可播放原聲，也可切換蒙皮和骨架顯示。
+- **同時預覽和匯出多位人物。** 同一段影片可選取多位人物；合併預覽和 FBX 保留他們在原始影片中的相對站位和入場時間。舊任務可從附縮圖的歷程中重新開啟。
+- **依素材調整動作。** 可調整動作濾波、腳部接觸修正和地面高度。需要更細緻的手指動作時，可啟用 HaMeR 手指精修。預設使用固定機位，鏡頭明顯轉向、俯仰或翻滾時再用運動相機。
+- **在本機執行。** 依需要安裝推論環境和模型，開始生成時才載入模型。安裝完成後可離線處理。支援简体中文、繁體中文、English、日本語、한국어、Русский 和 Français，重新開啟時會記住上次選的語言。
+- **動作匯出。** 支援 FlowHMR、Mixamo、MetaHuman、Maya AdvancedSkeleton FBX、MMD VMD、VRM Animation（VRMA）和 NPZ。一般自訂 FBX 可依角色原骨架與已儲存的動作校正匯出，可選擇是否包含蒙皮。套用自訂骨骼對應的 VRM 仍可匯出附蒙皮的動畫 GLB。FlowHMR 和通用 Mixamo FBX 可選擇是否包含蒙皮，以及在第 **−1 影格**加入 T Pose／A Pose。[匯出與重定向](../retarget-export.md)
+- **自訂角色。** 支援 PMX、VRM 0.x／1.0 和附蒙皮的 Mixamo／MetaHuman FBX。可為每位人物分配不同角色，對應骨骼、指定 IK 控制骨、調整旋轉與平移，也可載入與管理已儲存的預設。
+
+## 範例影片
+
+點擊縮圖開啟 MP4。四段皆使用中性 SMPL-H 體型，採用 30 FPS 的正交前視圖，保留所選區間內同步的原聲。
+
+| 運球與舞步 | 舞蹈 |
+| --- | --- |
+| [![運球與舞步](../../assets/demos/01-ikun-thumb.png)](../../assets/demos/01-ikun-front.mp4) | [![舞蹈](../../assets/demos/02-selei-thumb.png)](../../assets/demos/02-selei-front.mp4) |
+| **舞台角色動作** | **手勢與步伐** |
+| [![舞台角色動作](../../assets/demos/03-test2-thumb.png)](../../assets/demos/03-test2-front.mp4) | [![手勢與步伐](../../assets/demos/04-test3-thumb.png)](../../assets/demos/04-test3-front.mp4) |
+
+想自行試跑，可使用儲存庫中的[範例素材](../../assets/example/example.mp4)。
+
+## 快速開始
+
+1. 在 64 位元 Windows 10 或 11 完整解壓縮 `FlowHMR-Windows.zip`，進入解壓縮後的 `FlowHMR` 資料夾，按兩下 `FlowHMR.exe`。基礎套件內含 Python、介面元件和 FBX 匯出元件。
+2. 開啟右上角的 **執行環境**，依上表下載並啟用適用於裝置的環境。使用 GPU 前，請安裝相容的顯示卡驅動程式；選擇 **CPU** 不需另裝顯示卡驅動程式。
+3. 開啟 **模型**，選擇 **下載所有公開模型**（下载全部公开模型），或逐項下載。公開模型經驗證後會放入 `models/`，其中 SAM 3D Body 和 VGGT-Omega 由 ModelScope 提供。不需要手指精修時可以略過 HaMeR。需登入下載的官方模型請依下表取得。
+4. 將影片拖入軟體，選取要處理的人物和影格範圍，再開始生成。完成後先預覽，再從選單匯出 FBX、VMD、VRMA 或 NPZ。
+
+程式會在背景檢查更新。語言選單旁的 **檢查更新** 可查看發行說明、手動匯入更新壓縮檔，或選擇歷史版本。無法連上 GitHub 時仍可使用目前版本。
+
+### 該下載哪個官方模型？
+
+先登入 [MANO 官網下載頁](https://mano.is.tue.mpg.de/download.php)。**除了上一步安裝的公開模型，基本動作擷取只需要下表任一官方套件。若已有 `mano_v1_2.zip`，不必再下載中性套件。** 若兩個套件都已安裝，預設優先使用中性體型。
+
+| 用途 | 官網下載項目 | 手動解壓縮到 |
+| --- | --- | --- |
+| 可用於基本動作擷取的中性體型 | **Extended SMPL+H model**（AMASS），`smplh.tar.xz` | `models/body_models/smplh/` |
+| 可用於基本動作擷取的男性、女性體型；也包含手指精修所需的 MANO 檔案 | **Models & Code**，`mano_v1_2.zip` | `models/` |
+
+下載後，點擊 **模型 → 匯入模型壓縮檔…**，直接選取 `mano_v1_2.zip` 或 `smplh.tar.xz`。程式會自動解壓縮、辨識模型並安裝到正確位置，保留原始壓縮檔；模型面板會顯示哪些模型群組已就緒、哪些仍缺少檔案。若已解壓縮，也可點擊 **匯入已解壓縮的資料夾…**，選取解壓縮後的資料夾。
+
+手指精修需要 `mano_v1_2.zip` 中的 MANO 檔案和公開的 **HaMeR** 模型。HaMeR 可從該列單獨下載，也包含在 **下載所有公開模型** 中。
+
+手動安裝的完整目錄結構、下載來源和模型用途請參閱[模型檔案說明](../../models/README.md)。
+
+## 說明與專案來源
+
+- [Windows 使用、升級和原始碼建置說明](../../docs/windows.md) · [回報問題](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/issues/new)
+- [維護介面語言](../../docs/localization.md)
+- [FlowHMR 官方專案頁](https://flowhmr.github.io/) · [上游推論與訓練資料](https://github.com/flowhmr/flowhmr#readme) · [上游論文引用格式](https://github.com/flowhmr/flowhmr#citation)
+
+動作重建以 Zhanke Wang 等人的 **FlowHMR: Physically Plausible Motion Capture from Video** 為基礎。用於研究時請引用[原論文](https://arxiv.org/abs/2610.03691)。FlowHMR 原始碼採用 [Apache-2.0](../../LICENSE)；第三方元件和模型依各自授權發行，詳見發行套件內的 `THIRD_PARTY_NOTICES.md` 與[上游模型卡](https://huggingface.co/fafsaf1/flowhmr-0.46B)。

@@ -1,0 +1,263 @@
+"""Feature-only SAM scheduling using the unchanged upstream model and weights.
+
+Body inference supplies the hand boxes. Hand inference stops at the decoder
+tokens consumed by FlowHMR, before the unused fusion and refinement stages.
+"""
+
+from contextlib import nullcontext
+
+import numpy as np
+import torch
+
+from .sam_feature_only import unmasked_features
+
+
+class _HandTokensReady(Exception):
+    """Local control flow: the hand decoder has produced its conditioning token."""
+
+
+def _combine_batches(batches, device):
+    # Each frame occupies the batch axis, with its own intrinsics. The person
+    # axis stays at one even when left and right crops share a forward pass.
+    return {
+        key: torch.cat([batch[key] for batch in batches], dim=0).to(device)
+        for key, value in batches[0].items()
+        if isinstance(value, torch.Tensor)
+    }
+
+
+def mask_prompt_score(mask, box, *, min_pixels=64, min_fraction=0.02):
+    """Whether a SAM2 mask carries usable evidence for this crop.
+
+    ``0`` disables the mask prompt for the frame, so the estimator falls back to
+    conditioning on the box alone (the behaviour before mask conditioning
+    existed).  A SAM2 identity that collapses to a handful of pixels during a
+    crossing would otherwise be fed as "target present, no visible body", which
+    corrupts the pose features instead of merely losing detail.
+    """
+    pixels = int(np.count_nonzero(mask))
+    if pixels < min_pixels:
+        return 0.0
+    width = max(float(box[2]) - float(box[0]), 1.0)
+    height = max(float(box[3]) - float(box[1]), 1.0)
+    return 1.0 if pixels >= min_fraction * width * height else 0.0
+
+
+@torch.no_grad()
+def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
+                   merge_hands=False, hand_boxes_out=None, hand_boxes_only=False,
+                   hand_indices=None, fast_features=False, hand_skeleton=None,
+                   masks=None, observations_out=None):
+    """Return CPU float32 ``(frames, 3072)`` tokens in body/left/right order.
+
+    ``images`` contains RGB uint8 frames, one selected person per frame.
+    CPU crops and separate hand passes at batch size one preserve the original
+    operations leading to the tokens. Batching/GPU crops are optional and may
+    introduce floating-point differences. Full SAM outputs use the estimator's
+    original ``process_one_image`` entry point instead.
+
+    ``masks`` is an optional per-frame binary mask (frames, H, W) for the
+    selected person. When present the body crop is prepared with SAM 3D Body's
+    native mask prompt (the same path as ``process_one_image(masks=...)``).
+    This adds mask conditioning after RGB encoding; it does not erase pixels
+    outside the mask or guarantee exclusion of overlapping people.
+
+    ``hand_indices`` runs the two hand decoders only on the listed frames. The
+    hand slots of every other row are left as NaN so the caller can linearly
+    interpolate them between neighbours (sparse hand conditioning); the body
+    decoder always runs on the whole batch.
+    """
+    if not images or len(images) != len(boxes) or len(images) != len(cameras):
+        raise ValueError("Expected equally sized, nonempty images, boxes and cameras")
+    boxes = torch.as_tensor(boxes).detach().cpu().numpy().reshape(-1, 4)
+    cameras = torch.as_tensor(cameras).detach().cpu().reshape(-1, 3, 3)
+    if len(boxes) != len(images) or len(cameras) != len(images):
+        raise ValueError("Expected one box and one camera per frame")
+    if not np.isfinite(boxes).all() or not torch.isfinite(cameras).all():
+        raise ValueError("Boxes and cameras must be finite")
+    for image in images:
+        if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("Expected RGB uint8 HWC images")
+    frame_count = len(images)
+    if masks is not None:
+        masks = np.asarray(masks)
+        if masks.ndim == 4 and masks.shape[-1] == 1:
+            masks = masks[..., 0]
+        if masks.ndim != 3 or masks.shape[0] != frame_count:
+            raise ValueError("masks must have shape (frames, H, W) matching the batch")
+        if tuple(masks.shape[1:]) != tuple(images[0].shape[:2]):
+            raise ValueError(
+                f"mask size {tuple(masks.shape[1:])} does not match image size "
+                f"{tuple(images[0].shape[:2])}")
+        masks = masks.astype(np.uint8, copy=False)
+    if hand_indices is None:
+        hand_indices = np.arange(frame_count, dtype=np.int64)
+    hand_indices = np.asarray(hand_indices, dtype=np.int64).reshape(-1)
+    if hand_indices.size:
+        if hand_indices.min() < 0 or hand_indices.max() >= frame_count:
+            raise ValueError("hand_indices must stay inside the batch")
+        if hand_indices.size > 1 and not np.all(np.diff(hand_indices) > 0):
+            raise ValueError("hand_indices must be strictly increasing")
+    sparse_hands = hand_indices.size < frame_count
+
+    from sam_3d_body.data.utils.prepare_batch import prepare_batch
+
+    device = torch.device(estimator.device)
+    model = estimator.model
+    body_tokens, hand_tokens = [], []
+    original_single = (masks is None and len(images) == 1 and not gpu_preprocess
+                       and not merge_hands and hand_boxes_out is None and not hand_boxes_only
+                       and not sparse_hands and observations_out is None)
+
+    def capture_body(_module, _args, output):
+        body_tokens.append(output[0].detach() if original_single else output[0][:, 0].detach().clone())
+
+    def capture_hand(_module, _args, output):
+        hand_tokens.append(output[0].detach() if original_single else output[0][:, 0].detach().clone())
+        if not original_single or len(hand_tokens) == 2:
+            raise _HandTokensReady
+
+    def collected_tokens():
+        if len(body_tokens) != 1:
+            raise RuntimeError("SAM did not produce a body token")
+        body = body_tokens[0]
+        if sparse_hands:
+            hands = torch.full((frame_count, 2048), float("nan"),
+                               dtype=body.dtype, device=body.device)
+            if hand_indices.size:
+                if len(hand_tokens) != 2:
+                    raise RuntimeError("SAM did not produce left and right hand tokens")
+                sampled = torch.as_tensor(hand_indices, device=body.device)
+                hands[sampled] = torch.cat(hand_tokens, dim=-1)
+            tokens = torch.cat((body, hands), dim=-1)
+        else:
+            if len(hand_tokens) != 2:
+                raise RuntimeError("SAM did not produce left and right hand tokens")
+            pieces = [body, *hand_tokens]
+            if original_single:
+                pieces = [piece[:, 0] for piece in pieces]
+            tokens = torch.cat(pieces, dim=-1)
+        if tokens.shape != (len(images), 3072):
+            raise RuntimeError(f"Unexpected SAM token shape: {tuple(tokens.shape)}")
+        return tokens.to(device="cpu", dtype=torch.float32)
+
+    def prepare(image, box, camera, transform, mask=None, mask_score=1.0):
+        if mask is not None:
+            mask = np.asarray(mask, dtype=np.uint8)
+            if mask.ndim == 2:
+                mask = mask[..., None]
+            # A mask with no usable pixels is an ABSENT target, not an
+            # all-background prompt, so the estimator conditions on the box only.
+            return prepare_batch(image, transform, box[None], masks=mask[None],
+                                 masks_score=np.asarray([mask_score], dtype=np.float32),
+                                 cam_int=camera[None])
+        if gpu_preprocess:
+            from .sam_gpu_preprocess import prepare_gpu_batch
+            return prepare_gpu_batch(image, box[None], camera[None], transform)
+        return prepare_batch(image, transform, box[None], cam_int=camera[None])
+
+    # Upstream helpers use the current CUDA device internally. Scope it to the
+    # estimator, including when callers select a non-default GPU.
+    context = torch.cuda.device(device) if device.type == "cuda" else nullcontext()
+    # The public single-image route uses the full body's pose to initialize
+    # the hands. Only our batched path consumes hand boxes directly.
+    can_skip = (fast_features and not original_single and not model.training
+                and model.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False))
+    feature_context = (unmasked_features(model, hand_skeleton, keep_body_pose=observations_out is not None)
+                       if can_skip else nullcontext())
+    state_names = ("_batch_size", "_max_num_person", "_person_valid", "body_batch_idx", "hand_batch_idx")
+    state = {name: getattr(model, name) for name in state_names if hasattr(model, name)}
+    handles = []
+    try:
+        with context, feature_context:
+            if not hand_boxes_only:
+                handles.append(model.decoder.register_forward_hook(capture_body))
+                handles.append(model.decoder_hand.register_forward_hook(capture_hand))
+            if original_single:
+                # Keep the public estimator's exact preprocessing and scheduling
+                # for the default path. Only computation after both hand tokens
+                # have been produced is omitted.
+                try:
+                    estimator.process_one_image(
+                        images[0], bboxes=boxes, cam_int=cameras, inference_type="full",
+                    )
+                except _HandTokensReady:
+                    pass
+                return collected_tokens()
+            frames = ([torch.as_tensor(np.ascontiguousarray(img), device=device) for img in images]
+                      if gpu_preprocess else images)
+            if masks is None:
+                body_batch = _combine_batches([
+                    prepare(image, box, camera, estimator.transform)
+                    for image, box, camera in zip(frames, boxes, cameras)
+                ], device)
+            else:
+                # Mask prompts need the original CPU transform (SAM's public
+                # prepare_batch); hand crops keep the faster GPU preprocessing.
+                mask_scores = [mask_prompt_score(masks[index], boxes[index]) for index in range(len(images))]
+                body_batch = _combine_batches([
+                    prepare(images[index], boxes[index], cameras[index], estimator.transform,
+                            mask=masks[index], mask_score=mask_scores[index])
+                    for index in range(len(images))
+                ], device)
+            model._initialize_batch(body_batch)
+            body = model.forward_step(body_batch, decoder_type="body")
+            if observations_out is not None:
+                import roma
+
+                pose = body["mhr"]
+                flip = torch.diag(pose["global_rot"].new_tensor([1., -1., -1.]))
+                observations_out.append({
+                    "points": (pose["pred_keypoints_3d"] + pose["pred_cam_t"][:, None]).float().cpu().numpy(),
+                    "orientation": (flip @ roma.euler_to_rotmat('xyz', pose["global_rot"])).float().cpu().numpy(),
+                })
+            # Upstream _get_hand_box indexes affine_trans[0, person]. Expose the
+            # flattened frame transforms in that layout without mixing cameras.
+            geometry = {"affine_trans": body_batch["affine_trans"].flatten(0, 1).unsqueeze(0)}
+            left_boxes, right_boxes = model._get_hand_box(body, geometry)
+            del body, body_batch
+            if hand_boxes_only:
+                return torch.from_numpy(np.stack((left_boxes, right_boxes), axis=1).astype(np.float32))
+
+            def run_hands(indices, sides):
+                batches = []
+                for side in sides:
+                    for index in indices:
+                        image = frames[index]
+                        box = (left_boxes if side == "left" else right_boxes)[index].copy()
+                        if side == "left":
+                            box[[0, 2]] = image.shape[1] - box[[2, 0]] - 1
+                            image = image.flip(1) if gpu_preprocess else image[:, ::-1]
+                        batches.append(prepare(image, box, cameras[index], estimator.transform_hand))
+                batch = _combine_batches(batches, device)
+                model._initialize_batch(batch)
+                try:
+                    model.forward_step(batch, decoder_type="hand")
+                except _HandTokensReady:
+                    pass
+                else:
+                    raise RuntimeError("SAM hand decoder did not produce conditioning tokens")
+
+            hand_frames = range(len(images)) if not sparse_hands else hand_indices.tolist()
+            hand_count = len(images) if not sparse_hands else int(hand_indices.size)
+            if not hand_frames:
+                pass  # no sampled frame in this batch: hand slots stay NaN
+            elif merge_hands:
+                run_hands(hand_frames, ("left", "right"))
+                hand_tokens = list(hand_tokens.pop().split(hand_count, dim=0))
+            else:
+                run_hands(hand_frames, ("left",))
+                run_hands(hand_frames, ("right",))
+
+            tokens = collected_tokens()
+            if hand_boxes_out is not None:
+                hand_boxes_out.append(np.stack((left_boxes, right_boxes), axis=1).astype(np.float32))
+            return tokens
+    finally:
+        for handle in handles:
+            handle.remove()
+        for name in state_names:
+            if name in state:
+                setattr(model, name, state[name])
+            elif hasattr(model, name):
+                delattr(model, name)

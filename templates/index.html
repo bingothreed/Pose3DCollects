@@ -377,8 +377,12 @@
         <p class="model-location-note" data-i18n-html="settings.instant.locationNote">手动下载的模型放到这个目录，文件名需与下表一致（当前拟合方式见文件名）；另外需要 <code>mhr-body.onnx</code>。可从 <a href="https://huggingface.co/momolesang/InstantHMR/tree/main" target="_blank" rel="noreferrer">Hugging Face 模型页</a> 下载。</p>
         <div class="model-table" id="instantModels"></div>
         <div class="inline-form">
-          <label class="field"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="instantModelsDir" placeholder="InstantHMR/models"></label>
+          <label class="field"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="instantModelsDir" placeholder="engines/instanthmr/models"></label>
           <label class="field"><span data-i18n="settings.basePython">基础 Python</span><input type="text" id="instantBasePython" placeholder="python 或 py -3.12" data-i18n-placeholder="settings.basePythonPlaceholder"></label>
+        </div>
+        <p class="hint wide" data-i18n="settings.embeddedNote">已内置：源码、模型目录和虚拟环境均位于 engines/ 下，由「自动配置环境」与模型下载任务管理。</p>
+        <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="instantProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
         </div>
         <div class="inline-form">
           <label class="field"><span data-i18n="settings.defaultModel">默认模型</span>
@@ -437,13 +441,14 @@
         <p class="model-location-note" data-i18n="settings.gemx.locationNote">权重与 SOMA 资产的目标位置见下表；点行尾的「打开目录」可直接打开或创建对应文件夹，或使用下面的「自动下载模型」一键获取（约 4.1 GB，Hugging Face 下载走代理）。</p>
         <div class="model-table" id="gemxModels"></div>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="gemxRoot" placeholder="GEM-X 根目录" data-i18n-placeholder="settings.gemxRootPlaceholder"></label>
-          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="gemxPython" placeholder=".venv\Scripts\python.exe"></label>
+          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="gemxRoot" placeholder="engines/gemx" readonly></label>
+          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="gemxPython" placeholder=".venv\Scripts\python.exe" readonly></label>
         </div>
         <div class="inline-form">
-          <label class="field"><span data-i18n="settings.modelsDir">权重目录</span><input type="text" id="gemxModelsDir" placeholder="GEM-X/weights"></label>
-          <label class="field"><span data-i18n="settings.somaDir">SOMA 资产目录</span><input type="text" id="gemxSomaDir" placeholder="GEM-X/assets/soma"></label>
+          <label class="field"><span data-i18n="settings.modelsDir">权重目录</span><input type="text" id="gemxModelsDir" placeholder="engines/gemx/weights"></label>
+          <label class="field"><span data-i18n="settings.somaDir">SOMA 资产目录</span><input type="text" id="gemxSomaDir" placeholder="engines/gemx/assets/soma"></label>
         </div>
+        <p class="hint wide" data-i18n="settings.embeddedNote">已内置：源码、模型目录和虚拟环境均位于 engines/ 下，由「自动配置环境」与模型下载任务管理。</p>
         <div class="inline-form">
           <label class="field"><span data-i18n="settings.device">设备</span>
             <select id="gemxDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cuda" data-i18n="settings.cuda">CUDA</option><option value="cpu" data-i18n="settings.cpu">CPU</option></select>
@@ -499,6 +504,7 @@
         <p class="model-location-note" data-i18n="settings.tdpt.locationNote">模型目标位置见下表：单帧 224 模型来自 digital-standard/ThreeDPoseTracker 公共仓库（可用「自动下载模型」获取，约 33 MB）；3 帧 448 模型来自 ThreeDPoseLibrary，需要放到模型目录（不会自动下载）。</p>
         <div class="model-table" id="tdptModels"></div>
         <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="tdptModelsDir" placeholder="engines/tdpt/models"></label>
           <label class="field"><span data-i18n="settings.cameraIndex">摄像头编号</span><input type="number" id="tdptCameraIndex" min="0" max="15" step="1"></label>
           <p class="hint wide">TDPT 已内置：脚本、模型和独立虚拟环境均位于 <code>engines/tdpt</code>。</p>
         </div>
@@ -590,15 +596,22 @@
         <p class="model-location-note" data-i18n="settings.flow.locationNote">每个模型的完整目标位置见下表；点行尾的「打开目录」可直接打开或创建对应文件夹。公开模型可以使用上面的「下载公开模型」自动获取。</p>
         <div class="model-table" id="flowModels"></div>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="flowRoot" placeholder="FlowHMR 根目录" data-i18n-placeholder="settings.flowRootPlaceholder"></label>
-          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="flowPython" placeholder="runtime\python.exe"></label>
+          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="flowRoot" placeholder="engines/flowhmr" readonly></label>
+          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="flowPython" placeholder=".venv\Scripts\python.exe" readonly></label>
           <label class="field narrow"><span data-i18n="settings.port">端口</span><input type="number" id="flowPort" min="1024" max="65535"></label>
         </div>
         <div class="inline-form">
-          <label class="field"><span data-i18n="settings.basePythonNoRuntime">基础 Python（无内置环境时）</span><input type="text" id="flowBasePython" placeholder="python"></label>
+          <label class="field wide"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="flowModelsDir" placeholder="engines/flowhmr/models"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.basePythonNoRuntime">基础 Python（无内置环境时）</span><input type="text" id="flowBasePython" placeholder="py -3.10" readonly></label>
           <label class="field"><span data-i18n="settings.device">设备</span>
             <select id="flowDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cuda" data-i18n="settings.cuda">CUDA</option><option value="cpu" data-i18n="settings.cpu">CPU</option></select>
           </label>
+        </div>
+        <p class="hint wide" data-i18n="settings.flow.embeddedNote">已内置：FlowHMR 源码位于 engines/flowhmr，运行时环境由「自动配置环境」创建（需要 Python 3.10）。</p>
+        <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="flowProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
         </div>
         <div class="card-actions">
           <button type="button" class="btn primary" id="flowSaveBtn" data-i18n="settings.saveFlow">保存并检测</button>

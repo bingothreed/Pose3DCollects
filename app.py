@@ -92,10 +92,14 @@ def _merge_config(payload: dict) -> None:
         src = engines_payload[engine]
         dest = CONFIG["engines"][engine]
         for key in ("root", "python", "base_python", "models_dir", "device", "pose_filter"):
-            if engine == "tdpt" and key in ("root", "python", "models_dir"):
+            # Source and environment are embedded/managed by the app; the
+            # model directory stays user-configurable.
+            if key in ("root", "python"):
                 continue
             if key in src and src[key] is not None:
                 dest[key] = str(src[key]).strip()
+        if engine in ("instanthmr", "flowhmr") and "proxy" in src and src["proxy"] is not None:
+            dest["proxy"] = str(src["proxy"]).strip()
         if "model" in src and str(src["model"]):
             dest["model"] = str(src["model"])
         if "fit" in src and src["fit"] not in (None, ""):
@@ -159,8 +163,10 @@ def _merge_config(payload: dict) -> None:
             if detected_python:
                 eng["python"] = detected_python
         if engine == "instanthmr":
-            models = Path(eng.get("models_dir") or "")
-            if not eng.get("models_dir") or not models.is_dir():
+            if not eng.get("models_dir"):
+                eng["models_dir"] = str(root / "models")
+        elif engine == "flowhmr":
+            if not eng.get("models_dir"):
                 eng["models_dir"] = str(root / "models")
         elif engine == "gemx":
             if not eng.get("models_dir"):
@@ -218,6 +224,8 @@ def _check_engine(engine: str, params: dict | None = None) -> None:
                 missing.append("FlowHMR 目录")
             if not status["python_ok"]:
                 missing.append("运行环境")
+            if not status.get("deps_ok", True):
+                missing.append("Python 依赖")
             for item in status["models"]:
                 if item["required"] and not item["exists"]:
                     missing.append(item["label"])
@@ -330,7 +338,7 @@ def _job_params(engine: str) -> dict:
             "torso_opt": flag("torso_opt"),
             "crossing_opt": flag("crossing_opt"),
         }
-        if any(enhance.values()) and engines.flow_layout(Path(eng["root"]))["kind"] != "windows":
+        if any(enhance.values()) and engines.flow_layout(Path(eng["root"]), eng)["kind"] != "windows":
             raise ValueError("当前 FlowHMR 构建不支持模型增强选项（需要 Windows 便携版）")
         # Only version-agnostic fields plus the optional Windows enhancements:
         # each FlowHMR build fills the rest from its own defaults.
@@ -710,8 +718,11 @@ def _allowed_path_roots() -> list[Path]:
         roots.append(Path(engine["root"]))
         if engine.get("models_dir"):
             roots.append(Path(engine["models_dir"]))
+        if engine.get("soma_dir"):
+            roots.append(Path(engine["soma_dir"]))
     try:
-        roots.append(Path(engines.flow_layout(Path(CONFIG["engines"]["flowhmr"]["root"]))["models_dir"]))
+        roots.append(Path(engines.flow_layout(Path(CONFIG["engines"]["flowhmr"]["root"]),
+                                              CONFIG["engines"]["flowhmr"])["models_dir"]))
     except Exception:
         pass
     unique: list[Path] = []

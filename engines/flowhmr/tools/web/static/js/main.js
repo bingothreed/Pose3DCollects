@@ -1,0 +1,408 @@
+// Page controller: wires the cards together and polls the current job.
+import { $, show, createBus, jobLabel } from "./utils.js";
+import { appError, message as m, setText, setupLocalization } from "./i18n.js";
+import * as api from "./api.js";
+import { initUpload } from "./upload.js";
+import { initParams } from "./params.js";
+import { initProgress } from "./progress.js";
+import { initPersonSelect } from "./person-select.js";
+import { initPreview } from "./preview.js";
+import { initHistory } from "./history.js";
+import { initViewer } from "./viewer.js";
+import { initLayout } from "./layout.js";
+import { initTrim } from "./trim.js";
+import { initModelDialog } from "./models.js";
+import { initRuntimeDialog } from "./runtime.js";
+import { initMotionExport } from "./motion-export.js";
+import { initUpdates } from "./update.js";
+import { initMcpDialog } from "./mcp.js";
+import { initUIEvents } from './ui-events.js';
+
+setupLocalization();
+initMcpDialog();
+const confirmWorkspaceReady = initUpdates();
+const themeOptions = $("themeOptions");
+const themeButtons = [...themeOptions.querySelectorAll("[data-theme-choice]")];
+const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+let themePreference = localStorage.getItem("flowhmr-theme-mode");
+if (!["light", "dark", "system"].includes(themePreference)) themePreference = "dark";
+
+function setTheme(preference) {
+  themePreference = preference;
+  const dark = preference === "dark" || (preference === "system" && systemTheme.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  themeButtons.forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.themeChoice === preference));
+  });
+  window.dispatchEvent(new CustomEvent("flowhmr:themechange", { detail: { dark } }));
+}
+setTheme(themePreference);
+themeOptions.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-theme-choice]");
+  if (!button) return;
+  setTheme(button.dataset.themeChoice);
+  localStorage.setItem("flowhmr-theme-mode", themePreference);
+});
+systemTheme.addEventListener("change", () => {
+  if (themePreference === "system") setTheme("system");
+});
+
+const bus = createBus();
+initLayout();
+let info = null;
+let currentJob = null;
+let loadedResult = null;
+let paramsShownFor = null;
+let restoreParameterDraft = false;
+let submitting = false;
+let pollVersion = 0;
+let currentRevision = null;
+let knownJobs = null;
+const ACTIVE = new Set(["queued", "running", "waiting_user", "cancel_requested"]);
+
+const upload = initUpload(bus);
+for (const [menu, target] of [["menuImport", "fileInput"], ["menuNpz", "dlNpz"]]) {
+  $(menu).onclick = () => $(target).click();
+}
+document.addEventListener("click", (event) => {
+  for (const menu of document.querySelectorAll(".editor-menu[open]")) {
+    if (!menu.contains(event.target) || (!menu.hasAttribute("data-keep-open") && event.target.closest(".editor-menu-popup button"))) menu.open = false;
+  }
+});
+const progress = initProgress();
+const person = initPersonSelect(bus);
+const preview = initPreview(bus);
+const viewer = initViewer(preview);
+window.addEventListener('flowhmr:server-update', event => {
+  if (event.detail.kind === 'viewer_command') {
+    const { request_id: token, command } = event.detail.data;
+    void (async () => {
+      const base = `/api/ui/viewer-command/${token}`;
+      const claim = await fetch(`${base}/claim`, { method: 'POST' });
+      if (!claim.ok) return;
+      const result = viewer.controlPlayback(command);
+      await fetch(`${base}/reply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result),
+      });
+    })();
+    return;
+  }
+  if (event.detail.kind !== 'snapshot_request') return;
+  const token = event.detail.data.request_id;
+  void fetch(`/api/ui/viewer-snapshot/${token}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(viewer.snapshot()),
+  });
+});
+const motionExport = initMotionExport(() => viewer.bodyVariant, viewer);
+const trim = initTrim({ ...preview, seek: viewer.seekSourceFrame });
+const history = initHistory({ onOpen: (id) => openJob(id, { focus: true }), onRerun: rerun, onDeleted: clearDeletedJobs, onUpdated: syncExternalJobs });
+const runtime = initRuntimeDialog();
+let params = null;
+
+function renderModelStatus(loaded, loading = false) {
+  const missing = info?.model_files?.items.some((item) => item.blocking);
+  $("btnModels").classList.toggle("needs-models", !!missing);
+  setText($("modelInfo"), !info ? m("connection.offline") : missing ? m("models.required_missing")
+    : loading ? m("models.loading") : loaded ? info.device : m("models.deferred"));
+}
+
+function applyModelInfo(next) {
+  const variantsChanged = info?.body_variants?.join() !== next?.body_variants?.join();
+  info = next;
+  renderModelStatus(info?.models_loaded);
+  runtime.summarize(info?.runtime);
+  const hamerReady = !!info?.hamer_available;
+  $("optHamer").disabled = !hamerReady;
+  setText($("hamerHint"), m(hamerReady ? "hamer.hint" : "hamer.missing_hint"));
+  params?.refreshHamer();
+  const torsoReady = !!info?.torso_available;
+  $("optTorso").disabled = !torsoReady;
+  setText($("torsoHint"), m(torsoReady ? "torso.hint" : "torso.missing"));
+  params?.refreshTorso();
+  const crossingReady = !!info?.crossing_available;
+  $("optCrossing").disabled = !crossingReady;
+  setText($("crossingHint"), m(crossingReady ? "crossing.hint" : "crossing.missing"));
+  params?.refreshCrossing();
+  params?.setHybridAvailable(!!info?.sam_hybrid_available);
+  params?.setCameraOnCpuForAmdIgpu(!!info?.camera_on_cpu_for_amd_igpu);
+  if (variantsChanged) viewer.setBodyVariants(info?.body_variants, info?.body_reference);
+}
+
+initModelDialog(async () => {
+  const next = await api.getInfo();
+  if (!next.model_files) throw appError("connection.restart");
+  applyModelInfo(next);
+  return next.model_files;
+});
+
+// ------------------------------------------------------------------ boot
+try {
+  applyModelInfo(await api.getInfo());
+  setText($("uploadHint"), m("source.size_limit", { max: info.max_upload_mb }));
+} catch {
+  applyModelInfo(null);
+}
+if (info?.postprocess_available === false) {
+  $("optPostprocess").disabled = true;
+  setText($("postprocessHint"), m("correction.unavailable"));
+}
+params = initParams(info?.defaults ?? {}, info?.sam_manual_default ?? 24,
+  !!info?.sam_hybrid_available, !!info?.camera_on_cpu_for_amd_igpu);
+if (info?.runtime?.supported) runtime.restore();
+const jobs = (await history.refresh()) ?? [];
+const savedJob = localStorage.getItem("flowhmr-last-job");
+let initialJob = jobs.find((job) => job.status === "waiting_user" || job.status === "running")
+  ?? jobs.find((job) => ACTIVE.has(job.status))
+  ?? jobs.find((job) => job.id === savedJob);
+if (!initialJob && savedJob) {
+  try { initialJob = await api.getJob(savedJob); } catch { /* job may have been deleted */ }
+}
+initialJob ??= jobs.find((job) => job.status === "done") ?? jobs[0];
+if (initialJob) void openJob(initialJob.id, { restoreDraft: true });
+syncSubmit();
+if (info) confirmWorkspaceReady();
+initUIEvents();
+
+// ------------------------------------------------------------------ wiring
+bus.on("file:selected", (file) => {
+  if (currentJob) {
+    resetJobView();
+    history.setCurrent(null);
+    show("jobCard", false);
+    viewer.setStatus(m("view.new_video"));
+  }
+  params.newSource();
+  trim.begin();
+  preview.showLocal(file);
+  syncSubmit();
+});
+bus.on("file:cleared", () => {
+  if (!currentJob) { trim.clear(); preview.clear(); }
+  syncSubmit();
+});
+bus.on("preview:pick", (i) => person.select(i));
+bus.on("person:confirmed", () => poll());
+bus.on("person:reselect", () => rerunCurrent({ reselect_person: true }));
+
+$("btnSubmit").addEventListener("click", submit);
+$("btnDefaults").addEventListener("click", () => params.reset());
+$("btnAlignScene").addEventListener("click", async () => {
+  const id = currentJob;
+  if (!id) return;
+  const button = $("btnAlignScene");
+  button.disabled = true;
+  try { await api.prepareScene(id); if (id === currentJob) await poll(); }
+  catch (e) { if (id === currentJob) progress.showActionError(e); }
+  finally { button.disabled = false; }
+});
+$("btnStopRun").addEventListener("click", async () => {
+  const id = currentJob;
+  if (!id) return;
+  $("btnStopRun").disabled = true;
+  try {
+    const job = await api.getJob(id);
+    if (job.status === 'done' && ['queued', 'running', 'cancel_requested'].includes(job.camera_state)) await api.cancelCamera(id);
+    else await api.cancelJob(id);
+    if (id === currentJob) await poll();
+  } catch (e) {
+    if (id === currentJob) progress.showActionError(e.message ? e : m("job.stop_failed"));
+  }
+});
+$("btnRerun").addEventListener("click", () => rerunCurrent());
+$("btnSafeRerun").addEventListener("click", () => rerunCurrent({ vggt_interval: 0, static_camera: false }));
+window.addEventListener('flowhmr:cameraprogress', (event) => {
+  if (event.detail.id === currentJob) void poll();
+});
+
+async function rerunCurrent(overrides) {
+  if (!currentJob) return;
+  try {
+    await rerun(currentJob, overrides);
+  } catch (e) {
+    progress.showActionError(e.message ? e : m("job.rerun_failed"));
+  }
+}
+
+function syncSubmit() {
+  const btn = $("btnSubmit");
+  const needsRuntime = info?.runtime?.supported && !info.runtime.ready;
+  show(btn, !currentJob || !!upload.getFile());
+  btn.disabled = submitting || (!needsRuntime && !upload.getFile());
+  setText(btn, m(submitting ? "job.submitting" : needsRuntime ? "runtime.setup" : "settings.generate"));
+  $("btnRerun").disabled = $("btnSafeRerun").disabled = $("personReselect").disabled = submitting;
+}
+
+async function submit() {
+  if (info?.runtime?.supported && !info.runtime.ready) { runtime.open(); return; }
+  const file = upload.getFile();
+  if (!file) return;
+  let p;
+  try { p = { ...params.read(), ...trim.read() }; } catch (e) { upload.setError(e); return; }
+  submitting = true;
+  syncSubmit();
+  resetJobView();
+  try {
+    const id = await api.uploadVideo(file, p, (frac) => progress.showUploading(file.name, frac));
+    upload.clear();
+    await openJob(id);
+  } catch (e) {
+    progress.showError(e);
+  } finally {
+    submitting = false;
+    syncSubmit();
+  }
+}
+
+async function rerun(jobId, overrides = {}) {
+  if (submitting) return;
+  if (info?.runtime?.supported && !info.runtime.ready) { runtime.open(); return; }
+  const p = { ...params.read(overrides), ...(jobId === currentJob ? trim.read() : {}), ...overrides };
+  submitting = true;
+  syncSubmit();
+  try {
+    const id = await api.rerunJob(jobId, p);
+    await openJob(id, { focus: true });
+  } finally {
+    submitting = false;
+    syncSubmit();
+  }
+}
+
+function resetJobView() {
+  motionExport.clear();
+  pollVersion++;
+  currentJob = null;
+  loadedResult = null;
+  currentRevision = null;
+  person.reset();
+  preview.setTrack(null);
+  viewer.clear();
+  trim.clear();
+  show("btnRerun", false);
+  show("btnAlignScene", false);
+  show("btnSafeRerun", false);
+  show("btnStopRun", false);
+  setText($("workspaceState"), "FlowHMR");
+}
+
+function clearDeletedJobs(ids) {
+  if (ids.includes(localStorage.getItem("flowhmr-last-job"))) localStorage.removeItem("flowhmr-last-job");
+  if (!ids.includes(currentJob)) return;
+  resetJobView();
+  history.setCurrent(null);
+  preview.clear();
+  show("jobCard", false);
+  viewer.setStatus(m("view.empty"));
+  syncSubmit();
+}
+
+// ------------------------------------------------------------------ job polling
+function revision(job) {
+  return JSON.stringify([job.id, job.status, job.progress, job.params, job.selected_person ?? null,
+    job.person_count ?? null, job.message ?? null, job.loading_models ?? null, job.scene_state ?? null,
+    job.source_frames ?? null, job.stages ?? null, job.sam_batch ?? null, job.camera ?? null,
+    job.camera_state ?? null, job.camera_progress ?? null, job.camera_finished ?? null,
+    job.camera_available ?? null, job.camera_revision ?? null]);
+}
+
+function syncExternalJobs(jobs, polling) {
+  const incoming = knownJobs && jobs.find((job) => job.source === 'mcp' && !knownJobs.has(job.id));
+  if (!knownJobs) knownJobs = new Set();
+  for (const job of jobs) knownJobs.add(job.id);
+  if (submitting || upload.getFile()) return;
+  if (incoming) {
+    void openJob(incoming.id);
+    return;
+  }
+  const selected = jobs.find((job) => job.id === currentJob);
+  if (selected && (revision(selected) !== currentRevision || (polling && ACTIVE.has(selected.status)))) void poll();
+}
+
+async function openJob(id, { restoreDraft = false, focus = false } = {}) {
+  if (upload.getFile()) upload.clear();
+  resetJobView();
+  currentJob = id;
+  restoreParameterDraft = restoreDraft;
+  trim.begin();
+  paramsShownFor = null;
+  localStorage.setItem("flowhmr-last-job", id);
+  history.setCurrent(id);
+  // The clicked history row keeps keyboard focus, so Space would re-open it instead
+  // of playing. Move the shortcut scope to the 3D viewport.
+  if (focus) viewer.focus();
+  syncSubmit();
+  await poll();
+}
+
+async function poll() {
+  const id = currentJob;
+  if (!id) return;
+  const version = ++pollVersion;
+  let job;
+  try {
+    job = await api.getJob(id);
+  } catch (e) {
+    if (version === pollVersion) {
+      currentRevision = null;
+      setText($("modelInfo"), m("connection.reconnecting"));
+    }
+    return;
+  }
+  if (version !== pollVersion) return;
+  currentRevision = revision(job);
+  renderModelStatus(job.models_loaded ?? info?.models_loaded ?? true, job.status === "running" && job.loading_models);
+
+  progress.render(job);
+  viewer.setStatus(m(job.status === "done" ? "view.loading"
+    : job.status === "needs_alignment" ? "view.alignment_needed"
+    : job.status === "failed" ? "view.job_failed"
+    : job.status === "cancelled" ? "job.stopped"
+    : job.status === "cancel_requested" ? "job.stopping"
+    : job.status === "waiting_user" ? "view.choose_people"
+    : job.status === "queued" ? "view.job_queued"
+    : job.scene_state === "running" ? "job.scene_aligning"
+    : job.loading_models ? "job.model_loading"
+    : "job.generating"));
+  preview.showJob(api.videoUrl(id, job.has_preview_video, job.has_annotated_video), () => jobLabel(job));
+  person.update(job);
+  trim.setSource(job.source_frames);
+  trim.setEditable(!ACTIVE.has(job.status));
+  if (paramsShownFor !== id) {
+    params.openJob(id, job.params, job.correction, restoreParameterDraft);
+    trim.apply(job.params);
+    paramsShownFor = id;
+  }
+  if (job.status === "done" && loadedResult !== id) {
+    loadedResult = id;
+    params.suggestCorrectionHeight(job.correction);
+    motionExport.setResult(id, job);
+    $("dlNpz").href = api.npzUrl(id);
+    $("menuNpz").disabled = false;
+    show("dlNpz", true);
+    try {
+      const meta = await viewer.load(id, job.scene, job);
+      if (meta && id === currentJob) {
+        void loadTracks(id, job.scene);
+        if (version !== pollVersion) void poll();
+      }
+    } catch (e) {
+      if (id === currentJob) {
+        viewer.setStatus(m("view.preview_failed"));
+        progress.showActionError(m("view.preview_detail", { detail: e }));
+      }
+    }
+  } else if (job.status === "done") {
+    viewer.updateCameraStatus(job);
+    motionExport.updateCameraStatus(job);
+  }
+}
+
+async function loadTracks(id, scene) {
+  const tracks = await Promise.all((scene?.people ?? [{ id }]).map(async (p) => {
+    try {
+      const r = await fetch(`/api/jobs/${p.id}/track`);
+      return r.ok ? { ...await r.json(), person: p.person } : null;
+    } catch { return null; }
+  }));
+  if (id === currentJob) preview.setTracks(tracks.filter(Boolean));
+}

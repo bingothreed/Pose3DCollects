@@ -16,46 +16,16 @@ JOBS_DIR = DATA_DIR / "jobs"
 LOGS_DIR = DATA_DIR / "logs"
 TMP_DIR = DATA_DIR / "tmp"
 CONFIG_PATH = DATA_DIR / "config.json"
-PARENT_DIR = BASE_DIR.parent
-TDPT_ROOT = BASE_DIR / "engines" / "tdpt"
 
-
-def _first_dir(candidates: list[Path]) -> Path:
-    for path in candidates:
-        if path.is_dir():
-            return path
-    return candidates[0]
-
-
-def _instant_candidates() -> list[Path]:
-    return [
-        PARENT_DIR / "InstantHMR",
-        BASE_DIR / "InstantHMR",
-        PARENT_DIR / "InstantHMR-main",
-    ]
-
-
-def _gemx_candidates() -> list[Path]:
-    return [
-        PARENT_DIR / "GEM-X",
-        BASE_DIR / "GEM-X",
-        PARENT_DIR / "gem-x",
-    ]
-
-
-def _flow_candidates() -> list[Path]:
-    candidates = [
-        PARENT_DIR / "FlowHMR-Windows" / "FlowHMR",
-        PARENT_DIR / "flowhmr",
-        PARENT_DIR / "FlowHMR",
-        BASE_DIR / "flowhmr",
-    ]
-    # Prefer a checkout that can actually run on Windows right now.
-    ready = [p for p in candidates if (p / "runtime" / "python.exe").is_file()]
-    if ready:
-        return ready + [p for p in candidates if p not in ready]
-    with_models = [p for p in candidates if (p / "models" / "flowhmr_latest").is_dir()]
-    return with_models + [p for p in candidates if p not in with_models]
+# Every engine runner is vendored in this checkout.  Models, virtual
+# environments and caches live inside the same folder but are gitignored and
+# are prepared by the setup/model-download tasks.
+ENGINE_ROOTS = {
+    "instanthmr": BASE_DIR / "engines" / "instanthmr",
+    "flowhmr": BASE_DIR / "engines" / "flowhmr",
+    "gemx": BASE_DIR / "engines" / "gemx",
+    "tdpt": BASE_DIR / "engines" / "tdpt",
+}
 
 
 def venv_python(root: Path) -> str:
@@ -76,12 +46,10 @@ def flow_python(root: Path) -> str:
 
 
 def _defaults() -> dict:
-    instant_root = _first_dir(_instant_candidates())
-    flow_root = _first_dir(_flow_candidates())
-    gemx_root = _first_dir(_gemx_candidates())
-    # TDPT is a built-in engine.  Keep code, venv and models in this project
-    # instead of depending on a neighbouring TDPT checkout.
-    tdpt_root = TDPT_ROOT
+    instant_root = ENGINE_ROOTS["instanthmr"]
+    flow_root = ENGINE_ROOTS["flowhmr"]
+    gemx_root = ENGINE_ROOTS["gemx"]
+    tdpt_root = ENGINE_ROOTS["tdpt"]
     return {
         "app": {
             "name": "Pose3D Collects",
@@ -95,7 +63,7 @@ def _defaults() -> dict:
             "instanthmr": {
                 "root": str(instant_root),
                 "python": venv_python(instant_root),
-                "base_python": "python",
+                "base_python": "py -3.12",
                 "models_dir": str(instant_root / "models"),
                 "model": "medium",
                 "fit": 2,
@@ -104,10 +72,13 @@ def _defaults() -> dict:
                 "smooth": False,
                 "camera_index": 0,
                 "focal": None,
+                "proxy": "http://127.0.0.1:21882",
             },
             "flowhmr": {
                 "root": str(flow_root),
                 "python": flow_python(flow_root),
+                "base_python": "py -3.10",
+                "models_dir": str(flow_root / "models"),
                 "port": 60550,
                 "device": "auto",
                 "static_camera": False,
@@ -115,11 +86,12 @@ def _defaults() -> dict:
                 "steps": 20,
                 "sam_chunk_size": 16,
                 "startup_timeout": 300,
+                "proxy": "http://127.0.0.1:21882",
             },
             "gemx": {
                 "root": str(gemx_root),
                 "python": venv_python(gemx_root),
-                "base_python": "python",
+                "base_python": "py -3.12",
                 "models_dir": str(gemx_root / "weights"),
                 "soma_dir": str(gemx_root / "assets" / "soma"),
                 "checkpoint": "body_s240000.ckpt",
@@ -181,19 +153,29 @@ def load_config() -> dict:
             stored = {}
         if isinstance(stored, dict):
             _merge(cfg, stored)
-    # Migrate legacy external-TDPT configurations.  TDPT is deliberately not
-    # configurable as an external engine: a portable Pose3D Collects checkout
-    # owns its runner, virtual environment and model directory.
-    tdpt = cfg["engines"]["tdpt"]
-    tdpt["root"] = str(TDPT_ROOT)
-    tdpt["models_dir"] = str(TDPT_ROOT / "models")
-    tdpt["python"] = venv_python(TDPT_ROOT)
-    # Refresh auto-detected values when the stored ones are empty or stale.
-    for engine, key in (("instanthmr", "python"), ("flowhmr", "python"),
-                        ("gemx", "python"), ("tdpt", "python")):
-        if not cfg["engines"][engine].get(key):
-            root = Path(cfg["engines"][engine]["root"])
-            cfg["engines"][engine][key] = flow_python(root) if engine == "flowhmr" else venv_python(root)
+    # All engines are vendored in this checkout: force the source root and the
+    # model directories so a stale external configuration cannot take over.
+    # A working external interpreter is kept only until the local virtual
+    # environment has been created by the setup task.
+    for engine, root in ENGINE_ROOTS.items():
+        eng = cfg["engines"][engine]
+        eng["root"] = str(root)
+        if not eng.get("models_dir"):
+            eng["models_dir"] = str(root / ("weights" if engine == "gemx" else "models"))
+        if engine == "gemx" and not eng.get("soma_dir"):
+            eng["soma_dir"] = str(root / "assets" / "soma")
+        detected = flow_python(root) if engine == "flowhmr" else venv_python(root)
+        stored_python = eng.get("python") or ""
+        if detected:
+            eng["python"] = detected
+        elif engine == "flowhmr":
+            # The portable runtime cannot configure torch from an embedded
+            # source tree; require the Python 3.10 venv created by setup.
+            eng["python"] = ""
+        elif stored_python and Path(stored_python).is_file():
+            eng["python"] = stored_python
+        else:
+            eng["python"] = ""
     return cfg
 
 

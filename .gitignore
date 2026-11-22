@@ -8,6 +8,13 @@ data/tmp/
 data/state/
 data/webview/
 *.log
-engines/tdpt/models/
-engines/tdpt/.venv/
-engines/tdpt/__pycache__/
+engines/*/models/*
+!engines/*/models/README.md
+engines/*/weights/*
+!engines/*/weights/README.md
+engines/*/assets/soma/*
+!engines/*/assets/soma/README.md
+engines/*/runtime/
+engines/*/.cache/
+engines/*/logs/
+engines/*/output/

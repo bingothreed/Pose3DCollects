@@ -41,6 +41,7 @@ class FlowServer:
             self._config = {
                 "root": engine.get("root", ""),
                 "python": engine.get("python", ""),
+                "models_dir": engine.get("models_dir", ""),
                 "port": int(engine.get("port") or 60550),
                 "device": engine.get("device", "auto"),
                 "startup_timeout": int(engine.get("startup_timeout") or 300),
@@ -132,6 +133,8 @@ class FlowServer:
                 "FLOWHMR_ATTENTION_BACKEND": "query_batched",
                 "FLOWHMR_ATTENTION_QUERY_CHUNK_SIZE": "256",
             })
+            models_dir = self._config.get("models_dir") or (root / "models")
+            env["FLOWHMR_MODELS_DIR"] = str(models_dir)
             cmd = [python, "-u", "app.py", "--host", "127.0.0.1", "--port", str(self.port)]
             device = self._config.get("device") or "auto"
             if device not in ("", "auto"):

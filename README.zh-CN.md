@@ -47,19 +47,19 @@
 
 ## 首次配置引擎
 
-打开顶部 **设置与资源**，页面只显示当前顶栏选中的引擎；切换顶栏的 **InstantHMR / FlowHMR** 即查看另一个引擎的环境、模型和设置。
+打开顶部 **设置与资源**，页面只显示当前顶栏选中的引擎；切换顶栏引擎即可查看对应的环境、模型和设置。模型目录默认指向仓库内置的引擎目录，且可以随时修改；每个模型目录都保留一份入库的 `README.md` 占位说明，列出应放置的文件。
 
 ### InstantHMR
 
-默认自动检测这些位置（可在卡片里改）：
+InstantHMR 源码已内置到本仓库，运行器、环境和模型放在同一目录：
 
 | 项目 | 默认值 |
 |---|---|
-| 项目目录 | `..\InstantHMR` |
+| 项目目录 | `engines\instanthmr` |
 | 虚拟环境 | `<项目>\.venv\Scripts\python.exe` |
 | 模型目录 | `<项目>\models` |
 
-1. 点 **自动配置环境**：自动创建 `.venv`、执行 `pip install -r requirements.txt`，并校验运行依赖。
+1. 点 **自动配置环境**：自动创建 `.venv`，先从阿里云镜像安装 CUDA 12.6 版 PyTorch（无 NVIDIA 显卡时装 CPU 版），再执行 `pip install -r requirements.txt`，并校验运行依赖。需要 Python 3.12。
 2. 在模型表里选默认模型和拟合方式（默认 `medium` + `fit2`），点 **下载**：从 Hugging Face 下载 `instanthmr-<size>-fit<fit>.onnx` 和 `mhr-body.onnx`。
 3. 等状态变成 **已就绪**。
 
@@ -71,20 +71,19 @@
 
 ### FlowHMR
 
-默认优先使用 **FlowHMR-Windows 便携版**（`..\FlowHMR-Windows\FlowHMR`），它自带 Python 运行时和模型管理：
+FlowHMR-Windows 的**源码**已内置到 `engines\flowhmr`；运行时（Python 3.10 + PyTorch）在本目录创建，模型也下载到同一目录：
 
 | 项目 | 默认值 |
 |---|---|
-| 项目目录 | `..\FlowHMR-Windows\FlowHMR` |
-| Python | `<项目>\runtime\python.exe` |
+| 项目目录 | `engines\flowhmr` |
+| Python | `<项目>\.venv\Scripts\python.exe`（Python 3.10） |
 | 端口 | `60550` |
 | 模型目录 | `<项目>\models` |
 
-- 设置页会用「模型根目录」标出放置位置，可复制路径或直接打开/创建文件夹；每个模型行尾也有「打开目录」。手动下载的模型按行内完整路径放入即可。
-- 便携版环境已内置；点 **自动配置环境** 会复用 FlowHMR 自带的运行环境管理器，按显卡自动选择、下载并启用 PyTorch 推理运行环境（NVIDIA CUDA / AMD ROCm / Intel XPU / CPU，支持断点续传和 SHA-256 校验）。运行环境已就绪时只做检查；切换运行环境后会自动重启 FlowHMR 服务。
-- 模型缺失时点 **下载公开模型**，会调用 FlowHMR 自带的下载脚本（含 SHA-256 校验）。
+- 设置页会用「模型根目录」标出放置位置，可复制路径或直接打开/创建文件夹；每个模型行尾也有「打开目录」。手动下载的模型按行内完整路径放入即可。修改模型目录后需要重启 FlowHMR 服务才会生效。
+- 点 **自动配置环境** 会创建 Python 3.10 的 `.venv`，先从阿里云镜像安装 PyTorch/torchvision 2.8.0+cu128，再安装 `requirements-windows.txt`、Web/感知依赖和 YOLOX；不再需要便携版 `runtime\` 目录。
+- 模型缺失时点 **下载公开模型**，会调用 FlowHMR 自带的下载脚本（含 SHA-256 校验）；完整模型约 20 GB。
 - 官方需要登录/授权的体型包（MANO / SMPL-H）按 FlowHMR 的 `models/README.md` 手动下载，放到对应目录后点 **保存并检测**。
-- 也可以在设置里把项目目录改成上游 `flowhmr` 仓库；如果没有 `runtime`，**自动配置环境** 会创建 `.venv` 并安装上游依赖（含 PyTorch，体积很大）。上游模型需要按 `docs/install.md` 准备。
 
 提交第一个 FlowHMR 任务时会自动启动服务；首次启动需要加载模型，可能要几分钟。服务日志在 `data/logs/flowhmr-server.log`。
 
@@ -94,7 +93,7 @@ GEM-X（[NVIDIA](https://github.com/nv-tlabs/GEM-X)）按帧跑 **Body Pose**：
 
 | 项目 | 默认值 |
 |---|---|
-| 项目目录 | `..\GEM-X` |
+| 项目目录 | `engines\gemx` |
 | Python | `<项目>\.venv\Scripts\python.exe` |
 | 权重目录 | `<项目>\weights` |
 | SOMA 资产 | `<项目>\assets\soma` |
@@ -139,14 +138,17 @@ HMRCollects/
 ├─ start.bat              一键环境 + 浏览器启动
 ├─ start-desktop.bat      一键环境 + 独立窗口启动
 ├─ requirements-desktop.txt  可选 pywebview 依赖
+├─ engines/                内置引擎源码（模型/虚拟环境不入 git）
+│  ├─ instanthmr/          InstantHMR 包 + demo.py
+│  ├─ flowhmr/             FlowHMR 应用源码 + third_party
+│  ├─ gemx/                GEM-X 包 + 打包文件
+│  └─ tdpt/                TDPT VNect 运行器 + demo.py
 ├─ hub/
-│  ├─ config.py           配置与项目自动发现
+│  ├─ config.py           配置与内置引擎路径
 │  ├─ engines.py          引擎就绪检查、环境/模型安装任务
 │  ├─ flow_server.py      FlowHMR 服务生命周期 + HTTP 客户端
-│  └─ jobs.py             统一任务模型、InstantHMR worker 调度
-├─ workers/
-│  ├─ instanthmr_worker.py         在 InstantHMR 环境里跑推理，输出统一结果包
-│  └─ download_instanthmr_models.py
+│  └─ jobs.py             统一任务模型、引擎 worker 调度
+├─ workers/               统一结果写出器与模型下载脚本
 ├─ templates/index.html
 ├─ static/css/app.css
 ├─ static/js/             main / viewer / overlay / settings / api / state

@@ -21,10 +21,11 @@ INSTANT_TIER_LABEL = {
     "medium": "Medium · 最准",
     "medium-commercial": "Medium Commercial · 可商用",
 }
-INSTANT_MODULES = ["onnxruntime", "cv2", "numpy", "rfdetr"]
+INSTANT_MODULES = ["torch", "onnxruntime", "cv2", "numpy", "rfdetr"]
 INSTANT_DOWNLOAD_MODULES = ["huggingface_hub"]
 
 GEMX_MODULES = ["torch", "cv2", "numpy", "onnxruntime", "transformers", "soma", "gem"]
+FLOWHMR_MODULES = ["torch", "cv2", "flask", "yolox"]
 
 TDPT_MODULES = ["onnxruntime", "cv2", "numpy"]
 TDPT_MODEL_SINGLE = "MobileNet3D3_6.onnx"
@@ -39,6 +40,17 @@ GEMX_SOMA_FILES = [
 ]
 GEMX_TORCH_CUDA_WHEEL = ("https://mirrors.aliyun.com/pytorch-wheels/cu128/"
                          "torch-2.10.0%2Bcu128-cp312-cp312-win_amd64.whl")
+# InstantHMR uses Python 3.12 + CUDA 12.6 (matches its upstream setup script).
+INSTANT_TORCH_CUDA_WHEEL = ("https://mirrors.aliyun.com/pytorch-wheels/cu126/"
+                            "torch-2.14.1%2Bcu126-cp312-cp312-win_amd64.whl")
+INSTANT_TORCHVISION_CUDA_WHEEL = ("https://mirrors.aliyun.com/pytorch-wheels/cu126/"
+                                  "torchvision-0.29.1%2Bcu126-cp312-cp312-win_amd64.whl")
+# FlowHMR's Windows runtime is Python 3.10 + CUDA 12.8.
+FLOW_TORCH_CUDA_WHEEL = ("https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+                         "torch-2.8.0%2Bcu128-cp310-cp310-win_amd64.whl")
+FLOW_TORCHVISION_CUDA_WHEEL = ("https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+                               "torchvision-0.23.0%2Bcu128-cp310-cp310-win_amd64.whl")
+PYPI_MIRROR = "https://mirrors.aliyun.com/pypi/simple/"
 
 
 def instant_model_filename(tier: str, fit: int) -> str:
@@ -194,30 +206,20 @@ def instant_status(cfg: dict) -> dict:
     }
 
 
-def flow_layout(root: Path) -> dict:
-    """Where the current checkout keeps checkpoints (portable build vs upstream)."""
-    if (root / "models" / "flowhmr_latest").is_dir():
-        return {
-            "kind": "windows",
-            "main": root / "models" / "flowhmr_latest" / "flowhmr_latest.ckpt",
-            "main_cfg": root / "models" / "flowhmr_latest" / "config.yml",
-            "yolox": root / "models" / "yolox" / "yolox_l.pth",
-            "sam": root / "models" / "sam-3d-body-dinov3" / "model.ckpt",
-            "vggt": root / "models" / "vggt-omega" / "vggt_omega_1b_512.pt",
-            "body": [root / "models" / "body_models" / "smplh" / "neutral" / "model.npz",
-                     root / "models" / "mano_v1_2" / "models" / "MANO_RIGHT.pkl",
-                     root / "models" / "mano_v1_2" / "models" / "MANO_LEFT.pkl"],
-            "models_dir": root / "models",
-        }
+def flow_layout(root: Path, eng: dict | None = None) -> dict:
+    """Model paths for the vendored FlowHMR source (models live in ``models/``)."""
+    models_dir = Path((eng or {}).get("models_dir") or root / "models")
     return {
-        "kind": "upstream",
-        "main": root / "checkpoints" / "flowhmr_latest" / "flowhmr_latest.ckpt",
-        "main_cfg": root / "checkpoints" / "flowhmr_latest" / "config.yml",
-        "yolox": root / "ckpts" / "yolox" / "yolox_l.pth",
-        "sam": root / "ckpts" / "sam-3d-body-dinov3" / "model.ckpt",
-        "vggt": root / "ckpts" / "vggt-omega" / "vggt_omega_1b_512.pt",
-        "body": [root / "assets" / "body_models" / "smplh" / "neutral" / "model.npz"],
-        "models_dir": root / "checkpoints",
+        "kind": "windows",
+        "main": models_dir / "flowhmr_latest" / "flowhmr_latest.ckpt",
+        "main_cfg": models_dir / "flowhmr_latest" / "config.yml",
+        "yolox": models_dir / "yolox" / "yolox_l.pth",
+        "sam": models_dir / "sam-3d-body-dinov3" / "model.ckpt",
+        "vggt": models_dir / "vggt-omega" / "vggt_omega_1b_512.pt",
+        "body": [models_dir / "body_models" / "smplh" / "neutral" / "model.npz",
+                 models_dir / "mano_v1_2" / "models" / "MANO_RIGHT.pkl",
+                 models_dir / "mano_v1_2" / "models" / "MANO_LEFT.pkl"],
+        "models_dir": models_dir,
     }
 
 
@@ -299,10 +301,13 @@ def flow_runtime_info(root: Path, python: str = "") -> dict | None:
 def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
     engine = cfg["engines"]["flowhmr"]
     root = Path(engine["root"])
-    layout = flow_layout(root)
+    layout = flow_layout(root, engine)
     python = flow_python(cfg)
     root_ok = root.is_dir()
     python_ok = bool(python) and Path(python).is_file()
+    deps = check_modules(python, FLOWHMR_MODULES) if python_ok else {
+        m: False for m in FLOWHMR_MODULES}
+    deps_ok = python_ok and all(deps.values())
     models = [
         _model_row("FlowHMR 主模型", layout["main"], True, "flowhmr_latest.ckpt"),
         _model_row("主模型配置", layout["main_cfg"], True, "config.yml"),
@@ -325,7 +330,7 @@ def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
         "crossing": {"available": False, "reason": "unsupported"},
     }
     if layout["kind"] == "windows":
-        models_root = root / "models"
+        models_root = layout["models_dir"]
         hamer_files_ok = _files_exist(
             models_root / "hamer" / "hamer.ckpt",
             models_root / "hamer" / "model_config.yaml",
@@ -351,7 +356,8 @@ def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
     runtime = flow_runtime_info(root, python)
     runtime_ok = runtime is None or runtime["installed"]
     static_camera = bool(engine.get("static_camera"))
-    job_ready = root_ok and python_ok and core_ok and (static_camera or vggt_ok) and runtime_ok
+    job_ready = (root_ok and python_ok and deps_ok and core_ok
+                 and (static_camera or vggt_ok) and runtime_ok)
     return {
         "id": "flowhmr",
         "name": "FlowHMR",
@@ -368,12 +374,14 @@ def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
         "enhancements": enhancements,
         "root_ok": root_ok,
         "python_ok": python_ok,
+        "deps": deps,
+        "deps_ok": deps_ok,
         "models": models,
         "core_models_ok": core_ok,
         "vggt_ok": vggt_ok,
         "inference_runtime": runtime,
         "runtime_ok": runtime_ok,
-        "ready": root_ok and python_ok and core_ok,
+        "ready": root_ok and python_ok and deps_ok and core_ok,
         "job_ready": job_ready,
         "env_kind": ("bundled" if (root / "runtime" / "python.exe").is_file()
                      else "venv" if python_ok else "missing"),
@@ -652,12 +660,28 @@ class SetupManager:
                 self.stop(task.id)
 
 
+def _has_nvidia_gpu() -> bool:
+    try:
+        proc = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                              capture_output=True, text=True, timeout=15)
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+    except Exception:
+        return False
+
+
 def _setup_env(base: dict | None = None) -> dict:
     env = dict(os.environ)
     env.update(base or {})
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    return env
+
+
+def _proxy_env(proxy: str, base: dict | None = None) -> dict:
+    env = _setup_env(base)
+    if proxy:
+        env.update({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy})
     return env
 
 
@@ -723,9 +747,19 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
         def runner(task: SetupTask):
             venv_python = _ensure_venv(task, root, cfg["engines"]["instanthmr"].get("base_python", "python"))
             task.log("升级 pip…")
-            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], cwd=root)
-            task.log("安装 requirements.txt（首次可能需要较长时间）…")
-            _run_step(task, [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"], cwd=root)
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
+                             "-i", PYPI_MIRROR], cwd=root)
+            if _has_nvidia_gpu():
+                task.log("检测到 NVIDIA GPU：安装 CUDA 12.6 版 PyTorch（约 2.5 GB，走阿里云镜像）…")
+                _run_step(task, [str(venv_python), "-m", "pip", "install",
+                                 INSTANT_TORCH_CUDA_WHEEL, INSTANT_TORCHVISION_CUDA_WHEEL], cwd=root)
+            else:
+                task.log("未检测到 NVIDIA GPU：安装 CPU 版 PyTorch。")
+                _run_step(task, [str(venv_python), "-m", "pip", "install", "torch", "torchvision",
+                                 "-i", PYPI_MIRROR], cwd=root)
+            task.log("安装 requirements.txt（首次可能需要较长时间，走阿里云镜像）…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
+                             "-r", "requirements.txt"], cwd=root)
             task.log("校验运行依赖…")
             clear_caches()
             deps = check_modules(str(venv_python), INSTANT_MODULES, ttl=0)
@@ -782,21 +816,62 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             return manager.start("自动配置 FlowHMR 环境", engine, runner)
 
         def runner(task: SetupTask):
-            venv_python = _ensure_venv(task, root, cfg["engines"]["flowhmr"].get("base_python", "python"))
+            base_python = str(cfg["engines"]["flowhmr"].get("base_python") or "py -3.10")
+            if "3.10" not in base_python:
+                task.log(f"FlowHMR 需要 Python 3.10（当前基础 Python 为 {base_python}），改用 py -3.10")
+                base_python = "py -3.10"
+            venv_python = _ensure_venv(task, root, base_python)
             task.log("升级 pip…")
-            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], cwd=root)
-            task.log("安装 FlowHMR requirements.txt（含 PyTorch，体积很大）…")
-            _run_step(task, [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"], cwd=root)
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
+                             "-i", PYPI_MIRROR], cwd=root)
+            if os.name == "nt":
+                task.log("安装 CUDA 12.8 版 PyTorch（Python 3.10，走阿里云镜像）…")
+                _run_step(task, [str(venv_python), "-m", "pip", "install",
+                                 FLOW_TORCH_CUDA_WHEEL, FLOW_TORCHVISION_CUDA_WHEEL], cwd=root)
+            req = root / ("requirements-windows.txt" if os.name == "nt"
+                          and (root / "requirements-windows.txt").is_file()
+                          else "requirements.txt")
+            install_req = req
+            if req.name == "requirements-windows.txt":
+                # PyTorch is already installed from the Aliyun mirror above;
+                # drop its pins and the blocked PyTorch index so pip resolves
+                # the remaining packages from the Aliyun PyPI mirror only.
+                temp_req = cfgmod.TMP_DIR / f"flowhmr-requirements-{task.id}.txt"
+                temp_req.parent.mkdir(parents=True, exist_ok=True)
+                kept = []
+                for line in req.read_text(encoding="utf-8").splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith(("--extra-index-url", "torch==", "torchvision==", "-r ")):
+                        continue
+                    kept.append(line)
+                temp_req.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                install_req = temp_req
+            task.log(f"安装 {req.name} 的其余依赖（体积很大，走阿里云镜像）…")
+            try:
+                _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
+                                 "-r", str(install_req)], cwd=root)
+            finally:
+                if install_req != req:
+                    install_req.unlink(missing_ok=True)
             web_req = root / "tools" / "web" / "requirements.txt"
             if web_req.is_file():
                 task.log("安装 Web/感知依赖…")
-                _run_step(task, [str(venv_python), "-m", "pip", "install", "-r", str(web_req)], cwd=root)
+                _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
+                                 "-r", str(web_req)], cwd=root)
             yolox = root / "third_party" / "YOLOX"
             if yolox.is_dir():
                 task.log("安装 YOLOX（editable）…")
-                _run_step(task, [str(venv_python), "-m", "pip", "install", "wheel"], cwd=root)
+                _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
+                                 "wheel"], cwd=root)
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "--no-build-isolation",
                                  "--no-deps", "-e", str(yolox)], cwd=root)
+            task.log("校验运行依赖…")
+            clear_caches()
+            deps = check_modules(str(venv_python), FLOWHMR_MODULES, ttl=0)
+            missing = [name for name, ok in deps.items() if not ok]
+            if missing:
+                raise RuntimeError("依赖校验未通过，缺少: " + ", ".join(missing))
+            task.log("依赖校验通过: " + " / ".join(FLOWHMR_MODULES))
             task.log("环境准备完成。模型请用下方按钮或手动放置。")
 
         def success(task: SetupTask):
@@ -812,30 +887,24 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
         if not root.is_dir():
             raise RuntimeError(f"GEM-X 目录不存在: {root}")
 
-        def has_nvidia_gpu() -> bool:
-            try:
-                proc = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                                      capture_output=True, text=True, timeout=15)
-                return proc.returncode == 0 and bool(proc.stdout.strip())
-            except Exception:
-                return False
-
         def runner(task: SetupTask):
             venv_python = _ensure_venv(task, root, cfg["engines"]["gemx"].get("base_python", "python"))
             task.log("升级 pip…")
-            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], cwd=root)
-            if has_nvidia_gpu():
-                task.log("检测到 NVIDIA GPU：安装 CUDA 版 PyTorch（约 2.9 GB）…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
+                             "-i", PYPI_MIRROR], cwd=root)
+            if _has_nvidia_gpu():
+                task.log("检测到 NVIDIA GPU：安装 CUDA 版 PyTorch（约 2.9 GB，走阿里云镜像）…")
                 _run_step(task, [str(venv_python), "-m", "pip", "install",
                                  GEMX_TORCH_CUDA_WHEEL], cwd=root)
             else:
                 task.log("未检测到 NVIDIA GPU：使用 CPU 版 PyTorch。")
-            task.log("安装 GEM-X（含 transformers / onnxruntime 等依赖）…")
-            _run_step(task, [str(venv_python), "-m", "pip", "install", "-e", ".[video]"], cwd=root)
-            if has_nvidia_gpu():
+            task.log("安装 GEM-X（含 transformers / onnxruntime 等依赖，走阿里云镜像）…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
+                             "-e", ".[video]"], cwd=root)
+            if _has_nvidia_gpu():
                 task.log("检测到 NVIDIA GPU：把检测器运行时换成 GPU 版 ONNXRuntime…")
                 _run_step(task, [str(venv_python), "-m", "pip", "uninstall", "-y", "onnxruntime"], cwd=root)
-                _run_step(task, [str(venv_python), "-m", "pip", "install",
+                _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
                                  "onnxruntime-gpu>=1.20,<2"], cwd=root)
             task.log("校验运行依赖…")
             clear_caches()
@@ -914,13 +983,19 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
         models_dir = Path(eng.get("models_dir") or root / "models")
         models_dir.mkdir(parents=True, exist_ok=True)
         worker = cfgmod.BASE_DIR / "workers" / "download_instanthmr_models.py"
+        proxy = str(eng.get("proxy") or "").strip()
+        base_env = {"HF_HOME": str(root / ".cache" / "huggingface")}
 
         def runner(task: SetupTask):
-            _run_step(task, [python, str(worker), "--models-dir", str(models_dir),
-                             "--model", tier, "--fit", str(fit), "--body"],
-                      cwd=root, env=_setup_env({
-                          "HF_HOME": str(root / ".cache" / "huggingface"),
-                      }))
+            argv = [python, str(worker), "--models-dir", str(models_dir),
+                    "--model", tier, "--fit", str(fit), "--body"]
+            try:
+                _run_step(task, argv, cwd=root, env=_proxy_env(proxy, base_env))
+            except RuntimeError:
+                if not proxy:
+                    raise
+                task.log(f"[重试] 代理 {proxy} 下载失败，改为直连…")
+                _run_step(task, argv, cwd=root, env=_setup_env(base_env))
             task.log("模型下载完成。")
 
         return manager.start(f"下载 InstantHMR · {tier}", engine, runner)
@@ -935,12 +1010,23 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
         if not script.is_file():
             raise RuntimeError("该 FlowHMR 版本没有自动下载脚本，请按 docs/install.md 手动准备模型，"
                                "或把已有模型放进模型目录后点“重新检测”")
+        proxy = str(eng.get("proxy") or "").strip()
+        models_dir = Path(eng.get("models_dir") or root / "models")
+        base_env = {
+            "HF_HOME": str(root / ".cache" / "huggingface"),
+            "TORCH_HOME": str(root / ".cache" / "torch"),
+            "FLOWHMR_MODELS_DIR": str(models_dir),
+        }
 
         def runner(task: SetupTask):
-            _run_step(task, [python, str(script)], cwd=root, env=_setup_env({
-                "HF_HOME": str(root / ".cache" / "huggingface"),
-                "TORCH_HOME": str(root / ".cache" / "torch"),
-            }))
+            argv = [python, str(script)]
+            try:
+                _run_step(task, argv, cwd=root, env=_proxy_env(proxy, base_env))
+            except RuntimeError:
+                if not proxy:
+                    raise
+                task.log(f"[重试] 代理 {proxy} 下载失败，改为直连…")
+                _run_step(task, argv, cwd=root, env=_setup_env(base_env))
             task.log("模型下载完成。")
 
         return manager.start("下载 FlowHMR 公开模型", engine, runner)

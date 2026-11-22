@@ -1,0 +1,653 @@
+import os
+import os.path as osp
+import shutil
+import subprocess
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+import supervision as sv
+import torch
+from torch import Tensor
+
+from flowhmr.model_files import YOLOX, file_present, resolve_model
+from flowhmr.multishot.shot_detection import ShotDetector
+from flowhmr.utils.runtime_capabilities import detection_request_key
+
+# Repo root (for locating checkpoints)
+_repo_root = osp.normpath(osp.join(osp.dirname(__file__), "..", ".."))
+
+
+def _ffmpeg_override() -> Optional[str]:
+    """Resolve $FFMPEG, which may name the executable or the usual "bin" directory."""
+    raw = os.environ.get("FFMPEG")
+    if not raw:
+        return None
+    path = osp.expanduser(raw.strip().strip('"'))
+    if osp.isfile(path):
+        return path
+    if osp.isdir(path):
+        for name in ("ffmpeg.exe", "ffmpeg"):
+            candidate = osp.join(path, name)
+            if osp.isfile(candidate):
+                return candidate
+    elif not osp.isabs(path):
+        candidate = shutil.which(path)
+        if candidate:
+            return candidate
+    # Returning a directory or a missing path makes CreateProcess fail with a
+    # misleading WinError 5, so fall through to the bundled binary instead.
+    print(f">>> ignoring $FFMPEG={raw!r}: no ffmpeg executable there")
+    return None
+
+
+def _bundled_ffmpeg() -> Optional[str]:
+    """Return the imageio-ffmpeg binary staged with this release, if present."""
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+    return exe if exe and osp.isfile(exe) else None
+
+
+def find_ffmpeg() -> str:
+    """Return the ffmpeg executable to launch.
+
+    The bundled imageio-ffmpeg binary wins by default so every install transcodes
+    with the version this release was tested against. $FFMPEG (an executable, its
+    "bin" directory, or a PATH command) is the explicit override, and PATH is only
+    a fallback for installs without the bundled binary.
+    """
+    for exe in (_ffmpeg_override(), _bundled_ffmpeg(), shutil.which("ffmpeg")):
+        if exe:
+            return exe
+    raise RuntimeError(
+        "ffmpeg not found: reinstall the bundled imageio-ffmpeg binary "
+        "(`pip install imageio-ffmpeg`), install ffmpeg system-wide, or set $FFMPEG")
+
+
+# Type definitions
+@dataclass
+class VideoMeta:
+    """Metadata extracted from a video file."""
+    width: int
+    height: int
+    fps: float
+    total_frames: int
+
+
+@dataclass
+class TrackInfo:
+    """Single-person tracking info across frames."""
+    track_id: int
+    frames: np.ndarray
+    bboxes: np.ndarray
+    length: int = 0
+    avg_area: float = 0.0
+    bytetrack_ids: Tuple[int, ...] = ()
+    sam2_object_ids: Tuple[int, ...] = ()
+    observed_frames: np.ndarray | None = None  # Real detections whenever boxes include synthetic endpoints.
+    shot_ranges: np.ndarray | None = None  # Absolute source ranges, with an exclusive end.
+    source_fragments: Tuple["TrackInfo", ...] = ()
+
+    def __post_init__(self):
+        if not self.bytetrack_ids:
+            self.bytetrack_ids = (int(self.track_id),)
+        else:
+            self.bytetrack_ids = tuple(int(value) for value in self.bytetrack_ids)
+        self.sam2_object_ids = tuple(int(value) for value in (self.sam2_object_ids or ()))
+
+
+@dataclass
+class TrackingResult:
+    """Result from detect_and_track()."""
+    tracks: List[TrackInfo]
+    total_frames: int
+    width: int
+    height: int
+    scanned_range: tuple[int, int] | None = None  # inclusive source frame indices
+    shots: tuple = ()
+    edited_track: dict | None = None
+
+
+def open_video_at_frame(video_path, start_frame, cancel_check=None):
+    """Seek to an absolute frame, or skip from the start without running inference."""
+    cap = cv2.VideoCapture(video_path)
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"cannot open video: {video_path}")
+        if start_frame and (not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                            or cap.get(cv2.CAP_PROP_POS_FRAMES) != start_frame):
+            cap.release()
+            cap = cv2.VideoCapture(video_path)
+            for _ in range(start_frame):
+                if cancel_check is not None:
+                    cancel_check()
+                if not cap.grab():
+                    raise ValueError("起始帧超出素材范围。")
+        return cap
+    except BaseException:
+        cap.release()
+        raise
+
+
+class YOLOXHumanDetector:
+    """YOLOX-based human detector, drop-in replacement for the old detectron2 HumanDetector."""
+
+    def __init__(self, ckpt_path: str, device: torch.device, test_size: tuple = (640, 640)):
+        import sys as _sys
+        _yolox_dir = osp.join(_repo_root, "third_party", "YOLOX")
+        if _yolox_dir not in _sys.path:
+            _sys.path.insert(0, _yolox_dir)
+
+        from yolox.exp import get_exp # type: ignore
+        from yolox.data.data_augment import ValTransform # type: ignore
+        from yolox.utils import postprocess # type: ignore
+
+        self.device = device
+        self.test_size = test_size
+        self._postprocess = postprocess
+        self.preproc = ValTransform(legacy=False)
+
+        exp = get_exp(exp_name="yolox-l")
+        model = exp.get_model()
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(ckpt["model"])
+        model.to(device)
+        model.eval()
+        self.model = model
+        self.num_classes = exp.num_classes
+
+    def run_human_detection(
+        self,
+        img: np.ndarray,
+        det_cat_id: int = 0,
+        bbox_thr: float = 0.5,
+        nms_thr: float = 0.3,
+        default_to_full_image: bool = True,
+    ) -> Optional[np.ndarray]:
+        h, w = img.shape[:2]
+        ratio = min(self.test_size[0] / h, self.test_size[1] / w)
+
+        img_pre, _ = self.preproc(img, None, self.test_size)
+        img_tensor = torch.from_numpy(img_pre).unsqueeze(0).float().to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(img_tensor)
+            outputs = self._postprocess(outputs, self.num_classes, bbox_thr, nms_thr, class_agnostic=True)
+
+        if outputs[0] is None:
+            if default_to_full_image:
+                return np.array([[0, 0, w, h, 1.0]], dtype=np.float32)
+            return None
+
+        det = outputs[0].cpu().numpy() # (N, 7): x1,y1,x2,y2,obj_conf,cls_conf,cls_id
+        person_mask = det[:, 6].astype(int) == det_cat_id
+        det = det[person_mask]
+
+        if len(det) == 0:
+            if default_to_full_image:
+                return np.array([[0, 0, w, h, 1.0]], dtype=np.float32)
+            return None
+
+        bboxes = det[:, :4] / ratio
+        scores = det[:, 4] * det[:, 5] # obj_conf * cls_conf
+        result = np.hstack([bboxes, scores[:, None]]).astype(np.float32)
+        return result
+
+
+def build_human_detector(device: torch.device) -> YOLOXHumanDetector:
+    """Build YOLOX-L human detector. Raises FileNotFoundError if weights missing."""
+    ckpt_path = resolve_model(YOLOX)
+    if not file_present(ckpt_path):
+        raise FileNotFoundError(f"YOLOX checkpoint not found: {ckpt_path}")
+    return YOLOXHumanDetector(ckpt_path=str(ckpt_path), device=device)
+
+
+class VideoProcessor:
+    """Standalone video processing: transcode, detect+track, camera K, etc."""
+
+    def __init__(self, detector: YOLOXHumanDetector):
+        self.detector = detector
+
+    # Static helpers
+    @staticmethod
+    def get_video_meta(video_path: str) -> VideoMeta:
+        """Read video metadata via OpenCV."""
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"cannot open video: {video_path}")
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        finally:
+            cap.release()
+        return VideoMeta(width=width, height=height, fps=fps, total_frames=total_frames)
+
+    @staticmethod
+    def default_K_from_hw(height: int, width: int) -> np.ndarray:
+        """Default camera intrinsics from image dimensions (diagonal focal length)."""
+        f = float((height**2 + width**2) ** 0.5)
+        K = np.array([[f, 0.0, width / 2.0], [0.0, f, height / 2.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+        return K
+
+    # Camera
+    def compute_camera_K(self, video_path: str) -> Tuple[Tensor, None]:
+        """Compute per-frame camera intrinsics K (T, 3, 3). RT is always None (placeholder)."""
+        meta = self.get_video_meta(video_path)
+        total_frames = meta.total_frames
+        if total_frames <= 0:
+            cap = cv2.VideoCapture(video_path)
+            cnt = 0
+            while True:
+                ok, _ = cap.read()
+                if not ok:
+                    break
+                cnt += 1
+            cap.release()
+            total_frames = cnt
+        K0 = self.default_K_from_hw(meta.height, meta.width).astype(np.float32)
+        K = np.repeat(K0[None, ...], total_frames, axis=0)
+        return torch.from_numpy(K).to(torch.float32), None
+
+    # Transcode
+    @staticmethod
+    def transcode(
+        video_path: str,
+        backup_dir: str,
+        start_time: float = 0.0,
+        duration: Optional[float] = None,
+        force_fps: Optional[int] = 30,
+    ) -> str:
+        """Transcode video to a cached mp4, trying multiple encoders."""
+        os.makedirs(backup_dir, exist_ok=True)
+        base = osp.splitext(osp.basename(video_path))[0]
+        fps_tag = f"_{force_fps}fps" if force_fps else ""
+        cache_base = f"{base}{fps_tag}"
+        backup_path = osp.join(backup_dir, f"{cache_base}.mp4")
+
+        if os.path.exists(backup_path):
+            print(f">>> using cached transcoded video: {backup_path}")
+            return backup_path
+
+        ffmpeg_exe = find_ffmpeg()
+        # Write to a temp file and rename when done, so a reader (e.g. the web demo serving
+        # this file) never sees a half-written mp4.
+        tmp_path = osp.join(backup_dir, f"{cache_base}.part.mp4")
+
+        def build_cmd(encoder_name: Optional[str]) -> List[str]:
+            cmd = [ffmpeg_exe, "-y", "-ss", str(start_time), "-i", video_path]
+            if duration is not None:
+                cmd += ["-t", str(duration)]
+            if force_fps and encoder_name:
+                # FFmpeg 9 removed -vsync; -fps_mode cfr expresses the same constant
+                # frame-rate behavior for filtered output.
+                cmd += ["-vf", f"fps={int(force_fps)}", "-c:v", encoder_name, "-fps_mode", "cfr", "-pix_fmt", "yuv420p"]
+                if "libx264" in encoder_name or "libx265" in encoder_name:
+                    cmd += ["-preset", "fast", "-crf", "22"]
+                elif "nvenc" in encoder_name:
+                    cmd += ["-preset", "p4", "-cq", "24"]
+                else:
+                    cmd += ["-q:v", "5"]
+            else:
+                cmd += ["-c:v", "copy"]
+            cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k",
+                    "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", tmp_path]
+            return cmd
+
+        if force_fps:
+            candidate_encoders: List[Optional[str]] = ["libx264", "h264_nvenc", "mpeg4", "libx265"]
+        else:
+            candidate_encoders = [None]
+
+        last_error = ""
+        for enc in candidate_encoders:
+            cmd = build_cmd(enc)
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                os.replace(tmp_path, backup_path)
+                print(f">>> video transcoding done (using {ffmpeg_exe}, "
+                      f"encoder: {enc if enc else 'copy'}): {backup_path}")
+                return backup_path
+            except subprocess.CalledProcessError as e:
+                err_msg = e.stderr.strip() if e.stderr else str(e)
+                last_error = err_msg
+                continue
+
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise RuntimeError(
+            f"FFmpeg transcoding FAILED (using {ffmpeg_exe}; "
+            f"tried encoders: {candidate_encoders}): {last_error}")
+
+    # Detect + Track
+    def detect_and_track(
+        self,
+        video_path: str,
+        *,
+        bbox_thr: float = 0.4,
+        nms_thr: float = 0.3,
+        bytetrack_thresh: float = 0.25,
+        bytetrack_match: float = 0.8,
+        start_frame: int = 0,
+        end_frame: int | None = None,
+        on_progress=None,
+        cancel_check=None,
+        sam2_identity_objects=None,
+        find_shots: bool = False,
+    ) -> TrackingResult:
+        """Detect only the requested frames and keep track times on the original video timeline.
+
+        ``sam2_identity_objects`` optionally supplies SAM2 objects (see
+        ``flowhmr.utils.track_identity.Sam2Object``).  Non-overlapping ByteTrack
+        fragments of one continuously tracked object are then merged into one
+        canonical track while every original ByteTrack ID is preserved.
+        """
+        if start_frame < 0 or (end_frame is not None and end_frame < start_frame):
+            raise ValueError("人物检测的起止帧无效。")
+        tracker = sv.ByteTrack(
+            track_activation_threshold=bytetrack_thresh,
+            minimum_matching_threshold=bytetrack_match,
+        )
+        raw_tracks: Dict[int, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+        frame_idx = start_frame
+        shot_detector = ShotDetector() if find_shots else None
+
+        cap = open_video_at_frame(video_path, start_frame, cancel_check)
+        try:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+            planned_end = end_frame
+            if total_frames is not None and total_frames > 0:
+                planned_end = min(end_frame, total_frames - 1) if end_frame is not None else total_frames - 1
+            planned = planned_end - start_frame + 1 if planned_end is not None else None
+            pbar_total = planned if planned is not None else "?"
+            if planned is not None and planned <= 0:
+                raise ValueError(f"起始帧超出素材范围（共 {total_frames} 帧）。")
+            while end_frame is None or frame_idx <= end_frame:
+                if cancel_check is not None:
+                    cancel_check()
+                ok, frame_bgr = cap.read()
+                if not ok:
+                    break
+                if shot_detector is not None:
+                    shot_detector.observe(frame_bgr)
+
+                results = self.detector.run_human_detection(
+                    frame_bgr, det_cat_id=0, bbox_thr=bbox_thr, nms_thr=nms_thr, default_to_full_image=False,
+                )
+
+                if results is not None and len(results) > 0:
+                    if not isinstance(results, np.ndarray):
+                        results = np.array(results)
+                    xyxy = results[:, :4].astype(np.float32)
+                    confidence = results[:, 4].astype(np.float32)
+                    class_id = np.zeros((len(results),), dtype=int)
+                else:
+                    xyxy = np.empty((0, 4), dtype=np.float32)
+                    confidence = np.empty((0,), dtype=np.float32)
+                    class_id = np.empty((0,), dtype=int)
+
+                detections = sv.Detections(xyxy=xyxy, confidence=confidence, class_id=class_id)
+                detections = tracker.update_with_detections(detections)
+
+                tids = detections.tracker_id
+                if tids is None:
+                    tids = np.empty((0,), dtype=np.int64)
+                for tid, box in zip(tids, detections.xyxy):
+                    tid_i = int(tid)
+                    raw_tracks[tid_i]["bboxes"].append(box.astype(np.float32))
+                    raw_tracks[tid_i]["frames"].append(frame_idx)
+
+                frame_idx += 1
+                processed = frame_idx - start_frame
+                if processed % 100 == 0:
+                    print(f">>> bbox detection: {processed}/{pbar_total} frames", flush=True)
+                if on_progress is not None:
+                    on_progress(processed, planned)
+        finally:
+            cap.release()
+
+        if frame_idx == start_frame:
+            raise ValueError("处理区间内没有可读取的视频帧。")
+
+        # Build TrackInfo list
+        tracks: List[TrackInfo] = []
+        for tid, v in raw_tracks.items():
+            bboxes = np.stack(v["bboxes"], axis=0).astype(np.float32)
+            frames = np.asarray(v["frames"], dtype=np.int64)
+            areas = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+            tracks.append(TrackInfo(
+                track_id=int(tid),
+                frames=frames,
+                bboxes=bboxes,
+                length=int(bboxes.shape[0]),
+                avg_area=float(np.mean(areas)),
+            ))
+
+        last = frame_idx - 1
+        # At EOF the decoder's count wins; after a deliberate stop use the file metadata.
+        if end_frame is None or last < end_frame:
+            total_frames = frame_idx
+        print(f">>> bbox detection done: {frame_idx - start_frame} frames "
+              f"(source {start_frame + 1}–{last + 1}), {len(tracks)} tracks", flush=True)
+        shots = ()
+        if shot_detector is not None:
+            ranges, _ = shot_detector.finish()
+            shots = tuple((start_frame+shot["start"], start_frame+shot["end"]) for shot in ranges)
+        result = TrackingResult(tracks, max(total_frames or 0, frame_idx), width, height, (start_frame, last), shots)
+        if sam2_identity_objects:
+            from flowhmr.utils.track_identity import merge_result_identities
+
+            result = merge_result_identities(result, sam2_identity_objects)
+            result.shots = shots
+        return result
+
+    # Post-processing (all static)
+    @staticmethod
+    def replace_joined_track(result, candidate):
+        boxes = np.asarray(candidate["boxes"], dtype=np.float32)
+        frames = np.asarray(candidate["frames"], dtype=np.int64)
+        tracks = {track.track_id: track for track in result.tracks}
+        fragments = tuple(tracks[row["track_id"]] for row in candidate.get("source_tracks", ()))
+        result.tracks[candidate["track_index"]] = TrackInfo(
+            candidate["track_id"], frames, boxes, len(frames),
+            float(np.prod(boxes[:, 2:] - boxes[:, :2], axis=1).mean()),
+            bytetrack_ids=tuple(candidate.get("bytetrack_ids") or ()),
+            observed_frames=np.asarray(candidate["observed_frames"], dtype=np.int64),
+            shot_ranges=np.asarray(candidate["shot_ranges"], dtype=np.int64) if "shot_ranges" in candidate else None,
+            source_fragments=fragments,
+        )
+
+    @staticmethod
+    def select_best_track(result: TrackingResult) -> int:
+        """Select best track index by (length, avg_area) descending. Returns -1 if no tracks."""
+        if not result.tracks:
+            return -1
+        scored = [(i, t.length, t.avg_area) for i, t in enumerate(result.tracks)]
+        scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        return scored[0][0]
+
+    @staticmethod
+    def interpolate_track(track: TrackInfo, total_frames: int, *, first_frame: int = 0) -> np.ndarray:
+        """Interpolate boxes at consecutive source frames starting at first_frame."""
+        order = np.argsort(track.frames)
+        frames_sorted = track.frames[order].astype(np.float32)
+        bboxes_sorted = track.bboxes[order]
+
+        all_frames = np.arange(first_frame, first_frame + total_frames, dtype=np.float32)
+        bbox_arr = np.empty((total_frames, 4), dtype=np.float32)
+
+        if frames_sorted.size == 0:
+            bbox_arr[:] = 0.0
+            return bbox_arr
+        if frames_sorted.size == 1:
+            bbox_arr[:] = bboxes_sorted[0]
+            return bbox_arr
+
+        for j in range(4):
+            bbox_arr[:, j] = np.interp(
+                all_frames, frames_sorted, bboxes_sorted[:, j].astype(np.float32),
+                left=float(bboxes_sorted[0, j]), right=float(bboxes_sorted[-1, j]),
+            ).astype(np.float32)
+        return bbox_arr
+
+    @staticmethod
+    def track_bboxes(result: TrackingResult, track_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Per-frame boxes of one track over its own frame range.
+
+        Returns (bbox (N, 4) float32 xyxy, start_end int64 [first, last] frame, inclusive).
+        track_idx < 0 (or no tracks) gives a full-image box over the scanned interval.
+        """
+        if track_idx < 0 or not result.tracks:
+            start, end = result.scanned_range or (0, max(result.total_frames - 1, 0))
+            full_box = np.array([0.0, 0.0, float(result.width), float(result.height)], dtype=np.float32)
+            bbox = np.tile(full_box[None, :], (end - start + 1, 1))
+            return bbox, np.array([start, end], dtype=np.int64)
+        track = result.tracks[track_idx]
+        if track.shot_ranges is not None:
+            start, stop = int(track.shot_ranges[0, 0]), int(track.shot_ranges[-1, 1])
+            bbox = np.tile(np.array([0,0,result.width,result.height], np.float32), (stop-start, 1))
+            for a, b in track.shot_ranges:
+                indices = (track.frames >= a) & (track.frames < b)
+                if indices.any():
+                    frames, boxes = track.frames[indices], track.bboxes[indices]
+                    for axis in range(4):
+                        bbox[a-start:b-start, axis] = np.interp(np.arange(a,b), frames, boxes[:,axis])
+            return VideoProcessor.smooth_bboxes(bbox, result.width, result.height), np.array([start, stop-1], dtype=np.int64)
+        start, end = int(track.frames.min()), int(track.frames.max())
+        bbox = VideoProcessor.interpolate_track(track, end - start + 1, first_frame=start)
+        return VideoProcessor.smooth_bboxes(bbox, result.width, result.height), np.array([start, end], dtype=np.int64)
+
+    @staticmethod
+    def save_detected_track(path, result, track_idx, frame_range) -> None:
+        bbox, start_end = VideoProcessor.track_bboxes(result, track_idx)
+        track = result.tracks[track_idx] if track_idx >= 0 else None
+        extra = {}
+        if track is not None:
+            extra["track_id"] = np.asarray(int(track.track_id), dtype=np.int64)
+            extra["bytetrack_ids"] = np.asarray(track.bytetrack_ids, dtype=np.int64)
+            extra["sam2_object_ids"] = np.asarray(track.sam2_object_ids, dtype=np.int64)
+        if track_idx >= 0 and result.tracks:
+            track = result.tracks[track_idx]
+            observed = track.frames if track.observed_frames is None else track.observed_frames
+            extra["observed_frames"] = np.unique(observed).astype(np.int64, copy=False)
+            if track.shot_ranges is not None:
+                extra["shot_ranges"] = track.shot_ranges
+            if track.source_fragments:
+                fragments = track.source_fragments
+                extra["fragment_frames"] = np.concatenate([part.frames for part in fragments])
+                extra["fragment_boxes"] = np.concatenate([part.bboxes for part in fragments])
+                extra["fragment_ids"] = np.repeat([part.track_id for part in fragments],
+                                                 [len(part.frames) for part in fragments])
+        np.savez(path, bbox=bbox, start_end=start_end, detection_request=detection_request_key(frame_range),
+                 **extra)
+
+    @staticmethod
+    def smooth_bboxes(bbox_arr: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Clamp bboxes to image bounds. In-place modification + return."""
+        bbox_arr[:, 0] = np.clip(bbox_arr[:, 0], 0, width - 1)
+        bbox_arr[:, 1] = np.clip(bbox_arr[:, 1], 0, height - 1)
+        bbox_arr[:, 2] = np.clip(bbox_arr[:, 2], 1, width)
+        bbox_arr[:, 3] = np.clip(bbox_arr[:, 3], 1, height)
+        return bbox_arr
+
+    # High-level: detect → track → select → interpolate → clamp → Tensor
+    def compute_bboxes(
+        self,
+        video_path: str,
+        *,
+        bbox_thr: float = 0.4,
+        nms_thr: float = 0.3,
+        bytetrack_thresh: float = 0.25,
+        bytetrack_match: float = 0.8,
+        bbox_interp: bool = True,
+    ) -> Tensor:
+        """End-to-end bbox pipeline: detect+track → select best → interpolate → clamp.
+
+        Returns (T, 4) float32 Tensor of xyxy bboxes, one per frame.
+        Falls back to full-image bbox when no tracks are found.
+        """
+        result = self.detect_and_track(
+            video_path,
+            bbox_thr=bbox_thr,
+            nms_thr=nms_thr,
+            bytetrack_thresh=bytetrack_thresh,
+            bytetrack_match=bytetrack_match,
+        )
+        full_box = np.array([0.0, 0.0, float(result.width), float(result.height)], dtype=np.float32)
+
+        if not result.tracks:
+            print(">>> no track found, using full-image bbox")
+            bbox_arr = np.tile(full_box[None, :], (result.total_frames, 1)).astype(np.float32)
+        else:
+            best_idx = self.select_best_track(result)
+            track = result.tracks[best_idx]
+            print(f">>> selected track {track.track_id}: {track.length} frames, avg_area={track.avg_area:.0f}")
+
+            if track.frames.size == 0:
+                bbox_arr = np.tile(full_box[None, :], (result.total_frames, 1)).astype(np.float32)
+            elif bbox_interp:
+                bbox_arr = self.interpolate_track(track, result.total_frames)
+            else:
+                # Forward-fill: use last observed box
+                frame_to_box = {int(f): track.bboxes[i] for i, f in enumerate(track.frames.tolist())}
+                bbox_arr = np.empty((result.total_frames, 4), dtype=np.float32)
+                last_box = full_box.copy()
+                for t in range(result.total_frames):
+                    if t in frame_to_box:
+                        last_box = frame_to_box[t].astype(np.float32)
+                    bbox_arr[t] = last_box
+
+            bbox_arr = self.smooth_bboxes(bbox_arr, result.width, result.height)
+
+        return torch.from_numpy(bbox_arr).to(torch.float32)
+
+    # I/O helpers (static)
+    @staticmethod
+    def save_bbox_npz(bbox_npz_path: str, bbox_xyxy: Tensor) -> None:
+        bbox = bbox_xyxy.detach().cpu().numpy().astype(np.float32)
+        np.savez(bbox_npz_path, bbox=bbox, start_end=np.array([0, bbox.shape[0]], dtype=np.int64))
+
+    @staticmethod
+    def save_camera_npz(camera_npz_path: str, K_all: Tensor) -> None:
+        K = K_all.detach().cpu().numpy().astype(np.float32)
+        np.savez(camera_npz_path, K=K, start_end=np.array([0, K.shape[0]], dtype=np.int64))
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="runtime_video_processing standalone test")
+    parser.add_argument("--video", required=True, help="Path to input video")
+    args = parser.parse_args()
+
+    video_path = args.video
+    assert osp.exists(video_path), f"video not found: {video_path}"
+
+    # 1. Video meta
+    meta = VideoProcessor.get_video_meta(video_path)
+    print(f"[video_meta] {meta.width}x{meta.height}, {meta.fps:.1f}fps, {meta.total_frames} frames")
+
+    # 2. Build detector
+    print(f"[detector] YOLOX ckpt: {resolve_model(YOLOX)}")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    detector = build_human_detector(device)
+    print(f"[detector] OK on {device}")
+
+    # 3. Full bbox pipeline
+    proc = VideoProcessor(detector=detector)
+    bbox = proc.compute_bboxes(video_path)
+    print(f"[compute_bboxes] shape={tuple(bbox.shape)}")
+
+    # 4. Camera K
+    K_all, _ = proc.compute_camera_K(video_path)
+    print(f"[camera_K] shape={tuple(K_all.shape)}, fx={K_all[0, 0, 0]:.1f}")
+
+    print("\n[DONE] All steps completed successfully.")
