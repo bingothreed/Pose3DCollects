@@ -156,6 +156,7 @@ def instant_status(cfg: dict) -> dict:
         "fit": int(engine.get("fit") or 0),
         "device": engine.get("device", "auto"),
         "pose_filter": engine.get("pose_filter", "one-euro"),
+        "smooth": bool(engine.get("smooth", False)),
         "root_ok": root_ok,
         "python_ok": python_ok,
         "deps": deps,

@@ -88,6 +88,8 @@ def _defaults() -> dict:
                 "fit": 2,
                 "device": "auto",
                 "pose_filter": "one-euro",
+                "smooth": False,
+                "camera_index": 0,
                 "focal": None,
             },
             "flowhmr": {

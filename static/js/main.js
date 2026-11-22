@@ -300,6 +300,8 @@ function initPrecisionDefaults() {
   const fitEl = $("#instantFitJob");
   if (tierEl) tierEl.value = inst.model || "medium";
   if (fitEl) fitEl.value = String(inst.fit ?? 2);
+  const smoothEl = $("#instantSmoothJob");
+  if (smoothEl) smoothEl.checked = Boolean(inst.smooth);
   setFlowStepsValue(Number(state.config.engines?.flowhmr?.steps) || 20);
   precisionInitialized = true;
 }
@@ -328,6 +330,7 @@ function updatePrecisionUI() {
   const instant = state.engine === "instanthmr";
   show($("#instantPrecisionFields"), instant);
   show($("#instantPrecisionHint"), instant);
+  show($("#instantSmoothJobFields"), instant);
   show($("#flowPrecisionFields"), !instant);
   const hint = $("#instantPrecisionHint");
   if (instant && hint) {
@@ -510,7 +513,11 @@ async function startJob() {
   const file = state.selectedFile;
   const maxFrames = Number($("#maxFrames").value) || 0;
   const precision = engine === "instanthmr"
-    ? { model: $("#instantTierJob").value, fit: Number($("#instantFitJob").value) }
+    ? {
+        model: $("#instantTierJob").value,
+        fit: Number($("#instantFitJob").value),
+        smooth: $("#instantSmoothJob").checked,
+      }
     : {
         steps: Number($("#flowStepsJob").value),
         hamer: $("#flowHamer").checked,

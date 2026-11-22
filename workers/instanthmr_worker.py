@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu", "tensorrt", "coreml"))
     parser.add_argument("--max-frames", type=int, default=0, help="0 = all frames")
     parser.add_argument("--pose-filter", default="", choices=("", "one-euro", "alpha-beta"))
+    parser.add_argument("--smooth", action="store_true",
+                        help="smooth keypoints, mesh and translation across frames (1 Euro filter)")
     parser.add_argument("--focal", type=float, default=None)
     return parser.parse_args()
 
@@ -86,9 +88,14 @@ def main() -> None:
     total = limit if limit > 0 else (max_frames if max_frames else 0)
 
     pipeline, device = make_pipeline(args)
+    smoother = None
+    if args.smooth:
+        from instanthmr.smoothing import TemporalSmoother
+        smoother = TemporalSmoother()
     faces = np.asarray(pipeline.hmr.faces, dtype=np.uint32)
     emit(type="log", message=f"视频 {width}x{height} @ {fps:.2f} fps，"
-                             f"{'全部 ' + str(total) + ' 帧' if total else '按上限处理'}，设备 {device}")
+                             f"{'全部 ' + str(total) + ' 帧' if total else '按上限处理'}，设备 {device}"
+                             + ("，输出平滑 开启" if smoother is not None else ""))
 
     vertices_path = out / "mesh" / "vertices.bin"
     joints_path = out / "mesh" / "joints.bin"
@@ -116,8 +123,9 @@ def main() -> None:
             t = index / fps
             result = pipeline(rgb, t)
             durations.append((result.detector_ms, result.hmr_ms))
-            if result.persons:
-                person = result.persons[0]
+            persons = smoother(result.persons, t) if smoother is not None else result.persons
+            if persons:
+                person = persons[0]
                 verts = np.asarray(person.vertices_cam, np.float32)
                 verts = np.stack([verts[:, 0], -verts[:, 1], -verts[:, 2]], axis=1)
                 joints = np.asarray(person.joints_3d_cam, np.float32)
@@ -142,7 +150,7 @@ def main() -> None:
             if seen_person:
                 bbox_min = np.minimum(bbox_min, last_vertices.min(axis=0))
                 bbox_max = np.maximum(bbox_max, last_vertices.max(axis=0))
-            joints2d_all.append(person.joints_2d if result.persons else np.zeros((70, 2), np.float32))
+            joints2d_all.append(person.joints_2d if persons else np.zeros((70, 2), np.float32))
             joints3d_all.append(last_joints)
             boxes_all.append(box if box is not None else [0, 0, 0, 0])
             track_frames.append({"box": box, "score": score, "keypoints": keypoints})
@@ -204,6 +212,8 @@ def main() -> None:
                     "elapsed_s": round(time.perf_counter() - started, 2)},
         "device": device,
         "model": Path(args.model).name,
+        "pose_filter": args.pose_filter or "none",
+        "smooth": bool(args.smooth),
         "source_total_frames": frame_count or None,
     }
     (out / "mesh" / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),

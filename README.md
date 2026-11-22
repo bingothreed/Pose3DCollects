@@ -65,6 +65,10 @@ These locations are detected automatically by default (editable in the cards):
 
 Alternatively, place the model files in the model directory manually, then click **Save Settings** to refresh detection.
 
+**Task defaults** exposes two smoothing layers: **pose smoothing** (One-Euro by default, filters root rotation and body joint angles before the mesh is built) and **output smoothing** (off by default, applies a 1€ filter to keypoints, mesh and translation). The job panel also has an **Output smoothing** switch that overrides the default for a single job; fast motion may lag slightly when it is enabled.
+
+**Live camera:** set **Camera index** (default 0) in the InstantHMR card and click **Open live camera**. The app launches InstantHMR's own `demo.py --camera` with the current model, fit, device and smoothing settings: every captured frame is inferred immediately and the 2D/3D result updates in InstantHMR's Rerun window — **no recording or second pass**. The detector refreshes every 3rd frame while the body runs every frame. Click **Close live camera** (or exit the app) to stop. The log is `data/logs/instanthmr-camera.log`.
+
 ### FlowHMR
 
 The **FlowHMR-Windows portable build** (`..\FlowHMR-Windows\FlowHMR`) is preferred by default — it ships with its own Python runtime and model management:

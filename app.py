@@ -21,6 +21,7 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 from hub import config as cfgmod
 from hub import engines
 from hub.flow_server import FlowServer
+from hub.instant_camera import InstantCamera
 from hub.jobs import JobManager, VIDEO_EXTS, video_mime
 
 BASE_DIR = cfgmod.BASE_DIR
@@ -31,6 +32,7 @@ cfgmod.ensure_dirs()
 SETUP = engines.SetupManager()
 FLOW = FlowServer(cfgmod.LOGS_DIR)
 FLOW.configure(CONFIG)
+CAMERA = InstantCamera(cfgmod.LOGS_DIR)
 JOBS = JobManager(CONFIG, FLOW)
 
 MAX_UPLOAD = 24 * 1024 * 1024 * 1024  # 24 GiB
@@ -94,11 +96,13 @@ def _merge_config(payload: dict) -> None:
             dest["model"] = str(src["model"])
         if "fit" in src and src["fit"] not in (None, ""):
             dest["fit"] = int(src["fit"])
+        if "camera_index" in src and src["camera_index"] not in (None, ""):
+            dest["camera_index"] = int(src["camera_index"])
         if "focal" in src:
             dest["focal"] = float(src["focal"]) if src["focal"] not in (None, "") else None
         if "port" in src and src["port"] not in (None, ""):
             dest["port"] = int(src["port"])
-        for key in ("static_camera", "manual_select"):
+        for key in ("static_camera", "manual_select", "smooth"):
             if key in src:
                 dest[key] = bool(src[key])
         for key in ("steps", "sam_chunk_size", "startup_timeout"):
@@ -120,6 +124,7 @@ def _merge_config(payload: dict) -> None:
 
 def _engine_payload() -> dict:
     status = engines.all_status(CONFIG, FLOW.status())
+    status["instanthmr"]["camera"] = CAMERA.status()
     for engine_id in ("instanthmr", "flowhmr"):
         active = SETUP.active_for(engine_id)
         status[engine_id]["setup_running"] = active.id if active else None
@@ -215,6 +220,10 @@ def _job_params(engine: str) -> dict:
             params["fit"] = fit
         inst = CONFIG["engines"]["instanthmr"]
         params["pose_filter"] = inst.get("pose_filter", "one-euro")
+        smooth_raw = request.args.get("smooth")
+        params["smooth"] = (str(smooth_raw).lower() in ("1", "true", "on", "yes")
+                            if smooth_raw not in (None, "")
+                            else bool(inst.get("smooth", False)))
         params["focal"] = inst.get("focal")
     else:
         eng = CONFIG["engines"]["flowhmr"]
@@ -339,6 +348,29 @@ def api_flow_start():
 @app.post("/api/flowhmr/stop")
 def api_flow_stop():
     return jsonify(server=FLOW.stop())
+
+
+# --------------------------------------------------------------------------- instant camera
+@app.post("/api/instanthmr/camera/start")
+def api_instant_camera_start():
+    payload = request.get_json(silent=True) or {}
+    index = payload.get("camera_index")
+    if index in ("", None):
+        index = None
+    try:
+        return jsonify(camera=CAMERA.start(CONFIG, camera_index=index))
+    except (RuntimeError, ValueError) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/instanthmr/camera/stop")
+def api_instant_camera_stop():
+    return jsonify(camera=CAMERA.stop())
+
+
+@app.get("/api/instanthmr/camera")
+def api_instant_camera_status():
+    return jsonify(camera=CAMERA.status())
 
 
 # --------------------------------------------------------------------------- jobs
@@ -669,6 +701,7 @@ def _shutdown():
     SETUP.stop_all()
     JOBS.shutdown()
     FLOW.shutdown()
+    CAMERA.shutdown()
 
 
 def main() -> None:

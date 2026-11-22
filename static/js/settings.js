@@ -46,6 +46,7 @@ export function initSettings() {
 
   $("#instantSaveBtn").addEventListener("click", () => saveInstant(true));
   $("#instantEnvBtn").addEventListener("click", () => startSetup("instanthmr", "env"));
+  $("#instantCameraBtn").addEventListener("click", toggleInstantCamera);
   $("#instantOpenModels").addEventListener("click", () => openEngineModels("instanthmr"));
   $("#copyInstantModels").addEventListener("click", () => copyPath(
     state.engines?.instanthmr?.models_dir || $("#instantModelsDir").value.trim()));
@@ -79,6 +80,7 @@ export function initSettings() {
   on("engine", syncSettingsEngine);
   onLanguageChange(() => {
     syncSettingsEngine();
+    if (state.engines) updateEngineStatus(state.engines);
     if (watchedTask) updateSetupTaskLabels();
   });
   syncSettingsEngine();
@@ -89,6 +91,7 @@ export function syncSettingsEngine() {
   show($("#instantCard"), engine === "instanthmr");
   show($("#flowCard"), engine === "flowhmr");
   show($("#poseFilterField"), engine === "instanthmr");
+  show($("#instantSmoothField"), engine === "instanthmr");
   show($("#flowManualField"), engine === "flowhmr");
   show($("#flowStaticField"), engine === "flowhmr");
   const label = engine === "instanthmr" ? "InstantHMR" : "FlowHMR";
@@ -138,6 +141,7 @@ export function populateForms() {
   $("#instantModelSelect").value = inst.model || "medium";
   $("#instantFit").value = String(inst.fit ?? 2);
   $("#instantDevice").value = inst.device || "auto";
+  $("#instantCameraIndex").value = inst.camera_index ?? 0;
 
   const flow = cfg.engines.flowhmr;
   $("#flowRoot").value = flow.root || "";
@@ -148,6 +152,7 @@ export function populateForms() {
 
   $("#defaultMaxFrames").value = cfg.job?.max_frames ?? 300;
   $("#poseFilter").value = inst.pose_filter || "one-euro";
+  $("#instantSmooth").checked = Boolean(inst.smooth);
   $("#flowManualSelect").value = String(Boolean(flow.manual_select));
   $("#flowStaticCamera").value = String(Boolean(flow.static_camera));
   $("#ffmpegPath").value = cfg.ffmpeg || "";
@@ -198,6 +203,25 @@ function renderInstant(status) {
   $("#instantModels").innerHTML = rows.join("") || `<p class="muted small">${escapeHtml(t("settings.model.none"))}</p>`;
   $("#instantEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
   $("#instantEnvBtn").disabled = busy;
+
+  const camera = status.camera || {};
+  const running = camera.status === "running";
+  const cameraBtn = $("#instantCameraBtn");
+  if (cameraBtn) {
+    cameraBtn.textContent = running ? t("settings.cameraStop") : t("settings.cameraOpen");
+    cameraBtn.disabled = busy || (!status.ready && !running);
+    cameraBtn.title = camera.status === "error" ? (camera.message || "") : "";
+  }
+  const cameraHint = $("#instantCameraHint");
+  if (cameraHint) {
+    if (running) {
+      cameraHint.textContent = t("settings.cameraRunning", { index: camera.camera_index ?? 0 });
+    } else if (camera.status === "error") {
+      cameraHint.textContent = t("settings.cameraError");
+    } else {
+      cameraHint.textContent = t("settings.cameraHint");
+    }
+  }
 }
 
 function renderFlow(status) {
@@ -300,6 +324,7 @@ async function saveInstant(notify) {
         model: $("#instantModelSelect").value,
         fit: Number($("#instantFit").value),
         device: $("#instantDevice").value,
+        camera_index: Math.max(0, Math.trunc(Number($("#instantCameraIndex").value) || 0)),
       },
     },
   };
@@ -382,6 +407,32 @@ async function toggleFlowService() {
   }
 }
 
+async function toggleInstantCamera() {
+  const camera = state.engines?.instanthmr?.camera || {};
+  const button = $("#instantCameraBtn");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    if (camera.status === "running") {
+      await api.stopInstantCamera();
+      toast(t("settings.toast.cameraStopped"), "success");
+    } else {
+      const saved = await saveInstant(false);
+      if (!saved) return;
+      const index = Math.max(0, Math.trunc(Number($("#instantCameraIndex").value) || 0));
+      toast(t("settings.toast.cameraStarting"), "info");
+      await api.startInstantCamera({ camera_index: index });
+      toast(t("settings.toast.cameraStarted", { index }), "success");
+    }
+    await refreshEngines();
+  } catch (error) {
+    toast(error.message, "error", 8000);
+    await refreshEngines();
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function startSetup(engine, kind) {
   try {
     const response = kind === "env"
@@ -398,7 +449,10 @@ async function saveDefaults() {
     job: { max_frames: Number($("#defaultMaxFrames").value) || 0 },
     ffmpeg: $("#ffmpegPath").value.trim(),
     engines: {
-      instanthmr: { pose_filter: $("#poseFilter").value },
+      instanthmr: {
+        pose_filter: $("#poseFilter").value,
+        smooth: $("#instantSmooth").checked,
+      },
       flowhmr: {
         manual_select: $("#flowManualSelect").value === "true",
         static_camera: $("#flowStaticCamera").value === "true",

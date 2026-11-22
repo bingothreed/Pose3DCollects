@@ -565,6 +565,7 @@ html[data-theme="light"] .tabbar { background: rgba(250, 251, 255, 0.62); }
 .enhance-item strong { font-size: 11.5px; font-weight: 600; color: var(--text-2); }
 .enhance-item small { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
 .enhance-item.unavailable { opacity: 0.55; cursor: not-allowed; }
+.settings-toggle { grid-column: 1 / -1; }
 .hint a { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 2px; }
 
 /* ------------------------------------------------------------------ person picker */

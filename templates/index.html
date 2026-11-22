@@ -179,6 +179,16 @@
           </div>
           <p class="hint precision-hint" id="instantPrecisionHint"></p>
 
+          <div class="enhance-grid" id="instantSmoothJobFields">
+            <label class="enhance-item">
+              <input type="checkbox" id="instantSmoothJob">
+              <span>
+                <strong data-i18n="settings.smooth">输出平滑（1€ 滤波）</strong>
+                <small data-i18n="settings.smoothHint">平滑关键点、网格和位移，减少抖动；快速动作可能略滞后</small>
+              </span>
+            </label>
+          </div>
+
           <div class="field-grid compact" id="flowPrecisionFields">
             <label class="field">
               <span data-i18n="job.precision.flow">生成精度</span>
@@ -360,13 +370,16 @@
           <label class="field"><span data-i18n="settings.device">设备</span>
             <select id="instantDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cuda" data-i18n="settings.cuda">CUDA</option><option value="cpu" data-i18n="settings.cpu">CPU</option></select>
           </label>
+          <label class="field"><span data-i18n="settings.cameraIndex">摄像头编号</span><input type="number" id="instantCameraIndex" min="0" max="15" step="1"></label>
         </div>
         <div class="card-actions">
           <button type="button" class="btn primary" id="instantSaveBtn" data-i18n="settings.saveInstant">保存设置</button>
           <button type="button" class="btn" id="instantEnvBtn" data-i18n="settings.env"
             data-i18n-title="settings.envTitle">自动配置环境</button>
+          <button type="button" class="btn" id="instantCameraBtn" data-i18n="settings.cameraOpen">打开实时摄像头</button>
         </div>
         <p class="hint" data-i18n="settings.instant.hint">首次使用：先「自动配置环境」，再在模型表里点下载；也可以按上面的位置手动放置模型。</p>
+        <p class="hint" id="instantCameraHint" data-i18n="settings.cameraHint">逐帧实时推理（不录制、不二次重算），结果在 InstantHMR 自带的 Rerun 窗口中同步显示。检测器每 3 帧刷新，人体姿态每帧推理；关闭窗口或点「关闭实时摄像头」结束。</p>
       </section>
 
       <section class="card settings-card" id="flowCard">
@@ -419,12 +432,19 @@
         <div class="card-head"><h2 data-i18n="settings.defaults.title">任务默认值</h2></div>
         <div class="field-grid">
           <label class="field"><span data-i18n="settings.defaults.maxFrames">默认最大帧数</span><input type="number" id="defaultMaxFrames" min="0" max="10000" step="30"></label>
-          <label class="field" id="poseFilterField"><span data-i18n="settings.smoothing">InstantHMR 平滑</span>
+          <label class="field" id="poseFilterField"><span data-i18n="settings.smoothing">InstantHMR 姿态平滑</span>
             <select id="poseFilter">
               <option value="one-euro" data-i18n="settings.smoothing.oneEuro">One-Euro（推荐）</option>
               <option value="alpha-beta" data-i18n="settings.smoothing.alphaBeta">Alpha-Beta</option>
               <option value="none" data-i18n="settings.smoothing.off">关闭</option>
             </select>
+          </label>
+          <label class="enhance-item settings-toggle" id="instantSmoothField">
+            <input type="checkbox" id="instantSmooth">
+            <span>
+              <strong data-i18n="settings.smooth">输出平滑（1€ 滤波）</strong>
+              <small data-i18n="settings.smoothHint">平滑关键点、网格和位移，减少抖动；快速动作可能略滞后</small>
+            </span>
           </label>
           <label class="field" id="flowManualField"><span data-i18n="settings.personSelect">FlowHMR 人物选择</span>
             <select id="flowManualSelect">

@@ -230,6 +230,8 @@ class JobManager:
             pose_filter = params.get("pose_filter", status.get("pose_filter", "one-euro"))
             if pose_filter and pose_filter != "none":
                 cmd += ["--pose-filter", str(pose_filter)]
+            if params.get("smooth", status.get("smooth", False)):
+                cmd += ["--smooth"]
             focal = params.get("focal")
             if focal:
                 cmd += ["--focal", str(focal)]
