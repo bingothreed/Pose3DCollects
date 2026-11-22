@@ -17,6 +17,7 @@ LOGS_DIR = DATA_DIR / "logs"
 TMP_DIR = DATA_DIR / "tmp"
 CONFIG_PATH = DATA_DIR / "config.json"
 PARENT_DIR = BASE_DIR.parent
+TDPT_ROOT = BASE_DIR / "engines" / "tdpt"
 
 
 def _first_dir(candidates: list[Path]) -> Path:
@@ -39,14 +40,6 @@ def _gemx_candidates() -> list[Path]:
         PARENT_DIR / "GEM-X",
         BASE_DIR / "GEM-X",
         PARENT_DIR / "gem-x",
-    ]
-
-
-def _tdpt_candidates() -> list[Path]:
-    return [
-        PARENT_DIR / "TDPT",
-        BASE_DIR / "TDPT",
-        PARENT_DIR / "ThreeDPoseTracker",
     ]
 
 
@@ -86,7 +79,9 @@ def _defaults() -> dict:
     instant_root = _first_dir(_instant_candidates())
     flow_root = _first_dir(_flow_candidates())
     gemx_root = _first_dir(_gemx_candidates())
-    tdpt_root = _first_dir(_tdpt_candidates())
+    # TDPT is a built-in engine.  Keep code, venv and models in this project
+    # instead of depending on a neighbouring TDPT checkout.
+    tdpt_root = TDPT_ROOT
     return {
         "app": {
             "name": "Pose3D Collects",
@@ -144,6 +139,16 @@ def _defaults() -> dict:
                 "device": "cpu",
                 "smooth": True,
                 "root_smooth": False,
+                "kalman": True,
+                "kalman_interval": 0.45,
+                "kalman_noise": 0.4,
+                "lowpass": True,
+                "lowpass_order": 7,
+                "lowpass_smooth": 0.9,
+                "one_euro": True,
+                "one_euro_min_cutoff": 3.5,
+                "one_euro_beta": 0.005,
+                "one_euro_d_cutoff": 1.2,
                 "flip_video": False,
                 "scale": 0.01,
                 "camera_index": 0,
@@ -176,6 +181,13 @@ def load_config() -> dict:
             stored = {}
         if isinstance(stored, dict):
             _merge(cfg, stored)
+    # Migrate legacy external-TDPT configurations.  TDPT is deliberately not
+    # configurable as an external engine: a portable Pose3D Collects checkout
+    # owns its runner, virtual environment and model directory.
+    tdpt = cfg["engines"]["tdpt"]
+    tdpt["root"] = str(TDPT_ROOT)
+    tdpt["models_dir"] = str(TDPT_ROOT / "models")
+    tdpt["python"] = venv_python(TDPT_ROOT)
     # Refresh auto-detected values when the stored ones are empty or stale.
     for engine, key in (("instanthmr", "python"), ("flowhmr", "python"),
                         ("gemx", "python"), ("tdpt", "python")):

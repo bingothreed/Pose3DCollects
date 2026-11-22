@@ -92,6 +92,8 @@ def _merge_config(payload: dict) -> None:
         src = engines_payload[engine]
         dest = CONFIG["engines"][engine]
         for key in ("root", "python", "base_python", "models_dir", "device", "pose_filter"):
+            if engine == "tdpt" and key in ("root", "python", "models_dir"):
+                continue
             if key in src and src[key] is not None:
                 dest[key] = str(src[key]).strip()
         if "model" in src and str(src["model"]):
@@ -120,6 +122,25 @@ def _merge_config(payload: dict) -> None:
                     dest[key] = str(src[key]).strip()
             if "flip_video" in src:
                 dest["flip_video"] = bool(src["flip_video"])
+            for key in ("root_smooth", "kalman", "lowpass", "one_euro"):
+                if key in src:
+                    dest[key] = bool(src[key])
+            float_ranges = {
+                "kalman_interval": (0.0001, 10.0),
+                "kalman_noise": (0.0, 100.0),
+                "lowpass_smooth": (0.0, 1.0),
+                "one_euro_min_cutoff": (0.0001, 100.0),
+                "one_euro_beta": (0.0, 100.0),
+                "one_euro_d_cutoff": (0.0001, 100.0),
+            }
+            for key, (minimum, maximum) in float_ranges.items():
+                if key in src and src[key] not in (None, ""):
+                    value = float(src[key])
+                    if not minimum <= value <= maximum:
+                        raise ValueError(f"TDPT {key} 必须在 {minimum:g} 到 {maximum:g} 之间")
+                    dest[key] = value
+            if "lowpass_order" in src and src["lowpass_order"] not in (None, ""):
+                dest["lowpass_order"] = max(1, min(10, int(src["lowpass_order"])))
             if "scale" in src and src["scale"] not in (None, ""):
                 value = float(src["scale"])
                 if value <= 0:

@@ -47,6 +47,19 @@ def parse_args() -> argparse.Namespace:
                         help="1 = Kalman + low-pass + One-Euro post-processing")
     parser.add_argument("--root-smooth", type=int, default=0,
                         help="1 = avatar-root depth Kalman (body height -> z offset)")
+    parser.add_argument("--kalman", type=int, default=1,
+                        help="enable the per-joint constant-velocity Kalman stage")
+    parser.add_argument("--kalman-interval", type=float, default=0.45)
+    parser.add_argument("--kalman-noise", type=float, default=0.4)
+    parser.add_argument("--lowpass", type=int, default=1,
+                        help="enable the per-joint cascaded low-pass stage")
+    parser.add_argument("--lowpass-order", type=int, default=7)
+    parser.add_argument("--lowpass-smooth", type=float, default=0.9)
+    parser.add_argument("--one-euro", type=int, default=1,
+                        help="enable the per-joint One-Euro stage")
+    parser.add_argument("--one-euro-min-cutoff", type=float, default=3.5)
+    parser.add_argument("--one-euro-beta", type=float, default=0.005)
+    parser.add_argument("--one-euro-d-cutoff", type=float, default=1.2)
     parser.add_argument("--flip", type=int, default=0,
                         help="1 = flip frames vertically (Unity texture orientation)")
     parser.add_argument("--scale", type=float, default=DEFAULT_SCALE,
@@ -95,8 +108,20 @@ def main() -> None:
     max_frames = max(0, args.max_frames)
     total = min(source_frame_count, max_frames) if source_frame_count and max_frames else (
         source_frame_count or max_frames)
-    filters3d = PoseFilter() if args.smooth else None
-    filters2d = PoseFilter() if args.smooth else None
+    filter_options = {
+        "kalman": bool(args.kalman),
+        "kalman_interval": args.kalman_interval,
+        "kalman_noise": args.kalman_noise,
+        "lowpass": bool(args.lowpass),
+        "lpf_order": args.lowpass_order,
+        "lpf_smooth": args.lowpass_smooth,
+        "one_euro": bool(args.one_euro),
+        "one_euro_min_cutoff": args.one_euro_min_cutoff,
+        "one_euro_beta": args.one_euro_beta,
+        "one_euro_d_cutoff": args.one_euro_d_cutoff,
+    }
+    filters3d = PoseFilter(**filter_options) if args.smooth else None
+    filters2d = PoseFilter(**filter_options) if args.smooth else None
     root_smoother = RootDepthSmoother() if args.root_smooth else None
 
     vertices_path = out / "mesh" / "vertices.bin"
@@ -127,18 +152,23 @@ def main() -> None:
             durations.append((time.perf_counter() - t0) * 1000.0)
 
             mean_score = float(frame.scores.mean())
+            # TDPBarracudaRunner updates its filter cascade for every model
+            # output, before the avatar controller performs score gating.  Do
+            # the same here: this keeps Kalman's velocity state continuous and
+            # makes short occlusions use its predicted trajectory instead of a
+            # frozen previous pose.
+            now = (index + 1) / fps
+            kps3, kps2 = frame.joints3d, frame.joints2d
+            if filters3d is not None:
+                kps3 = filters3d.apply(kps3, now)
+            if filters2d is not None and kps2 is not None:
+                kps2 = filters2d.apply(kps2, now)
+            predicted_joints = derive(kps3 * runner.unit_scale)
+            predicted_joints_2d = (derive(kps2 * runner.unit_scale)
+                                   if kps2 is not None else predicted_joints.copy())
             if mean_score >= SCORE_THRESHOLD:
-                # Same order as TDPBarracudaRunner: filter the 24 model
-                # joints (2D and 3D separately), then derive hip/head/neck/spine.
-                now = (index + 1) / fps
-                kps3, kps2 = frame.joints3d, frame.joints2d
-                if filters3d is not None:
-                    kps3 = filters3d.apply(kps3, now)
-                if filters2d is not None and kps2 is not None:
-                    kps2 = filters2d.apply(kps2, now)
-                last_joints = derive(kps3 * runner.unit_scale)
-                last_joints_2d = (derive(kps2 * runner.unit_scale)
-                                  if kps2 is not None else last_joints.copy())
+                last_joints = predicted_joints
+                last_joints_2d = predicted_joints_2d
                 if root_smoother is not None:
                     root_smoother.update(last_joints, frame.scores)
                 seen_person = True
@@ -146,8 +176,12 @@ def main() -> None:
                 empty += 1
                 if last_joints is None:
                     last_joints = np.zeros((28, 3), np.float32)
+                else:
+                    last_joints = predicted_joints
                 if last_joints_2d is None:
                     last_joints_2d = np.zeros((28, 3), np.float32)
+                else:
+                    last_joints_2d = predicted_joints_2d
 
             px = project2d(last_joints_2d, width, height)
             scaled_joints = last_joints * scale
@@ -231,9 +265,13 @@ def main() -> None:
         "heatmap": runner.heat_size,
         "smooth": bool(args.smooth),
         "two_d_head": runner.has_2d,
-        "filters": (["kalman", "lowpass", "one_euro"] if args.smooth else []),
-        "filters_2d": (["kalman", "lowpass", "one_euro"]
-                       if args.smooth and runner.has_2d else []),
+        "filters": ([name for name, enabled in (
+            ("kalman", args.kalman), ("lowpass", args.lowpass),
+            ("one_euro", args.one_euro)) if args.smooth and enabled]),
+        "filters_2d": ([name for name, enabled in (
+            ("kalman", args.kalman), ("lowpass", args.lowpass),
+            ("one_euro", args.one_euro)) if args.smooth and runner.has_2d and enabled]),
+        "filter_options": filter_options if args.smooth else {},
         "root_smooth": bool(args.root_smooth),
         "root_smooth_final_offset": (round(root_smoother.offset, 4)
                                      if root_smoother is not None else None),

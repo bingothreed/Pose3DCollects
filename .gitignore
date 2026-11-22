@@ -8,3 +8,6 @@ data/tmp/
 data/state/
 data/webview/
 *.log
+engines/tdpt/models/
+engines/tdpt/.venv/
+engines/tdpt/__pycache__/

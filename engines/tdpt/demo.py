@@ -27,6 +27,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True)
     parser.add_argument("--no-smooth", action="store_true",
                         help="disable Kalman / low-pass / One-Euro post-processing")
+    parser.add_argument("--kalman", type=int, default=1)
+    parser.add_argument("--kalman-interval", type=float, default=0.45)
+    parser.add_argument("--kalman-noise", type=float, default=0.4)
+    parser.add_argument("--lowpass", type=int, default=1)
+    parser.add_argument("--lowpass-order", type=int, default=7)
+    parser.add_argument("--lowpass-smooth", type=float, default=0.9)
+    parser.add_argument("--one-euro", type=int, default=1)
+    parser.add_argument("--one-euro-min-cutoff", type=float, default=3.5)
+    parser.add_argument("--one-euro-beta", type=float, default=0.005)
+    parser.add_argument("--one-euro-d-cutoff", type=float, default=1.2)
     parser.add_argument("--flip", action="store_true",
                         help="flip frames vertically (only if the picture is upside down)")
     return parser.parse_args()
@@ -51,8 +61,20 @@ def main() -> None:
 
     flip = args.flip
     smooth = not args.no_smooth
-    filters3d = PoseFilter() if smooth else None
-    filters2d = PoseFilter() if smooth and runner.has_2d else None
+    filter_options = {
+        "kalman": bool(args.kalman),
+        "kalman_interval": args.kalman_interval,
+        "kalman_noise": args.kalman_noise,
+        "lowpass": bool(args.lowpass),
+        "lpf_order": args.lowpass_order,
+        "lpf_smooth": args.lowpass_smooth,
+        "one_euro": bool(args.one_euro),
+        "one_euro_min_cutoff": args.one_euro_min_cutoff,
+        "one_euro_beta": args.one_euro_beta,
+        "one_euro_d_cutoff": args.one_euro_d_cutoff,
+    }
+    filters3d = PoseFilter(**filter_options) if smooth else None
+    filters2d = PoseFilter(**filter_options) if smooth and runner.has_2d else None
     started = time.perf_counter()
     scores = np.zeros(28, np.float32)
     fps_smooth = 0.0

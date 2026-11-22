@@ -88,6 +88,19 @@ class TDPTCamera:
                    "--model", str(model_path)]
             if not engine.get("smooth", True):
                 cmd += ["--no-smooth"]
+            else:
+                cmd += [
+                    "--kalman", "1" if engine.get("kalman", True) else "0",
+                    "--kalman-interval", str(engine.get("kalman_interval", 0.45)),
+                    "--kalman-noise", str(engine.get("kalman_noise", 0.4)),
+                    "--lowpass", "1" if engine.get("lowpass", True) else "0",
+                    "--lowpass-order", str(engine.get("lowpass_order", 7)),
+                    "--lowpass-smooth", str(engine.get("lowpass_smooth", 0.9)),
+                    "--one-euro", "1" if engine.get("one_euro", True) else "0",
+                    "--one-euro-min-cutoff", str(engine.get("one_euro_min_cutoff", 3.5)),
+                    "--one-euro-beta", str(engine.get("one_euro_beta", 0.005)),
+                    "--one-euro-d-cutoff", str(engine.get("one_euro_d_cutoff", 1.2)),
+                ]
 
             env = dict(os.environ)
             env.update({"PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"})

@@ -499,13 +499,8 @@
         <p class="model-location-note" data-i18n="settings.tdpt.locationNote">模型目标位置见下表：单帧 224 模型来自 digital-standard/ThreeDPoseTracker 公共仓库（可用「自动下载模型」获取，约 33 MB）；3 帧 448 模型来自 ThreeDPoseLibrary，需要放到模型目录（不会自动下载）。</p>
         <div class="model-table" id="tdptModels"></div>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="tdptRoot" placeholder="TDPT 根目录" data-i18n-placeholder="settings.tdptRootPlaceholder"></label>
-          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="tdptPython" placeholder=".venv\Scripts\python.exe"></label>
-        </div>
-        <div class="inline-form">
-          <label class="field"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="tdptModelsDir" placeholder="TDPT/models"></label>
-          <label class="field"><span data-i18n="settings.basePython">基础 Python</span><input type="text" id="tdptBasePython" placeholder="python 或 py -3.12" data-i18n-placeholder="settings.basePythonPlaceholder"></label>
           <label class="field"><span data-i18n="settings.cameraIndex">摄像头编号</span><input type="number" id="tdptCameraIndex" min="0" max="15" step="1"></label>
+          <p class="hint wide">TDPT 已内置：脚本、模型和独立虚拟环境均位于 <code>engines/tdpt</code>。</p>
         </div>
         <div class="inline-form">
           <label class="field wide"><span data-i18n="settings.tdpt.model">模型（帧窗口）</span>
@@ -529,6 +524,22 @@
             </select>
             <small data-i18n="settings.tdpt.rootSmoothHint">按身高估计并平滑根节点 z 位移（ThreeDPoseLibrary avatar 根 Kalman）；开启会改变 root_trajectory</small>
           </label>
+          <details class="field wide tdpt-filter-options">
+            <summary>滤波器高级参数</summary>
+            <small>与 ThreeDPoseLibrary 的独立 Kalman、低通和 One-Euro 设置一一对应；关闭总开关时这些参数不会生效。</small>
+            <div class="inline-form">
+              <label><input type="checkbox" id="tdptKalman"> Kalman</label>
+              <label>间隔 <input type="number" id="tdptKalmanInterval" min="0.0001" max="10" step="0.01"></label>
+              <label>噪声 <input type="number" id="tdptKalmanNoise" min="0" max="100" step="0.01"></label>
+              <label><input type="checkbox" id="tdptLowpass"> 低通</label>
+              <label>阶数 <input type="number" id="tdptLowpassOrder" min="1" max="10" step="1"></label>
+              <label>平滑度 <input type="number" id="tdptLowpassSmooth" min="0" max="1" step="0.01"></label>
+              <label><input type="checkbox" id="tdptOneEuro"> One-Euro</label>
+              <label>最小截止 <input type="number" id="tdptOneEuroMinCutoff" min="0.0001" max="100" step="0.01"></label>
+              <label>Beta <input type="number" id="tdptOneEuroBeta" min="0" max="100" step="0.001"></label>
+              <label>D 截止 <input type="number" id="tdptOneEuroDCutoff" min="0.0001" max="100" step="0.01"></label>
+            </div>
+          </details>
           <label class="field"><span data-i18n="settings.tdpt.flip">视频输入垂直翻转</span>
             <select id="tdptFlipVideo">
               <option value="true" data-i18n="settings.on">开</option>

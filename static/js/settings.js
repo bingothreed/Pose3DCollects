@@ -87,7 +87,7 @@ export function initSettings() {
   $("#tdptCameraBtn").addEventListener("click", toggleTdptCamera);
   $("#tdptOpenModels").addEventListener("click", () => openEngineModels("tdpt"));
   $("#copyTdptModels").addEventListener("click", () => copyPath(
-    state.engines?.tdpt?.models_dir || $("#tdptModelsDir").value.trim()));
+    state.engines?.tdpt?.models_dir || ""));
   $("#tdptOpenRoot").addEventListener("click", () => openFolder("tdpt", "root"));
   $("#tdptModels").addEventListener("click", (event) => {
     const button = event.target.closest("[data-open-path]");
@@ -194,10 +194,6 @@ export function populateForms() {
   $("#gemxProxy").value = gemx.proxy || "";
 
   const tdpt = cfg.engines.tdpt;
-  $("#tdptRoot").value = tdpt.root || "";
-  $("#tdptPython").value = tdpt.python || "";
-  $("#tdptModelsDir").value = tdpt.models_dir || "";
-  $("#tdptBasePython").value = tdpt.base_python || "python";
   $("#tdptCameraIndex").value = tdpt.camera_index ?? 0;
   const modelSelect = $("#tdptModel");
   if (modelSelect) {
@@ -212,6 +208,16 @@ export function populateForms() {
   }
   $("#tdptSmooth").value = String(Boolean(tdpt.smooth));
   $("#tdptRootSmooth").value = String(Boolean(tdpt.root_smooth));
+  $("#tdptKalman").checked = tdpt.kalman !== false;
+  $("#tdptKalmanInterval").value = Number(tdpt.kalman_interval ?? 0.45);
+  $("#tdptKalmanNoise").value = Number(tdpt.kalman_noise ?? 0.4);
+  $("#tdptLowpass").checked = tdpt.lowpass !== false;
+  $("#tdptLowpassOrder").value = Number(tdpt.lowpass_order ?? 7);
+  $("#tdptLowpassSmooth").value = Number(tdpt.lowpass_smooth ?? 0.9);
+  $("#tdptOneEuro").checked = tdpt.one_euro !== false;
+  $("#tdptOneEuroMinCutoff").value = Number(tdpt.one_euro_min_cutoff ?? 3.5);
+  $("#tdptOneEuroBeta").value = Number(tdpt.one_euro_beta ?? 0.005);
+  $("#tdptOneEuroDCutoff").value = Number(tdpt.one_euro_d_cutoff ?? 1.2);
   $("#tdptFlipVideo").value = String(Boolean(tdpt.flip_video));
   $("#tdptScale").value = Number(tdpt.scale ?? 0.01);
   $("#tdptProxy").value = tdpt.proxy || "";
@@ -499,14 +505,20 @@ async function saveTdpt(notify) {
   const payload = {
     engines: {
       tdpt: {
-        root: $("#tdptRoot").value.trim(),
-        python: $("#tdptPython").value.trim(),
-        models_dir: $("#tdptModelsDir").value.trim(),
-        base_python: $("#tdptBasePython").value.trim(),
         model: $("#tdptModel").value,
         camera_index: Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0)),
         smooth: $("#tdptSmooth").value === "true",
         root_smooth: $("#tdptRootSmooth").value === "true",
+        kalman: $("#tdptKalman").checked,
+        kalman_interval: Number($("#tdptKalmanInterval").value),
+        kalman_noise: Number($("#tdptKalmanNoise").value),
+        lowpass: $("#tdptLowpass").checked,
+        lowpass_order: Math.trunc(Number($("#tdptLowpassOrder").value)),
+        lowpass_smooth: Number($("#tdptLowpassSmooth").value),
+        one_euro: $("#tdptOneEuro").checked,
+        one_euro_min_cutoff: Number($("#tdptOneEuroMinCutoff").value),
+        one_euro_beta: Number($("#tdptOneEuroBeta").value),
+        one_euro_d_cutoff: Number($("#tdptOneEuroDCutoff").value),
         flip_video: $("#tdptFlipVideo").value === "true",
         scale: Math.max(0.0001, Number($("#tdptScale").value) || 0.01),
         proxy: $("#tdptProxy").value.trim(),

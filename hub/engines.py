@@ -526,6 +526,16 @@ def tdpt_status(cfg: dict) -> dict:
         "device": engine.get("device", "cpu"),
         "smooth": bool(engine.get("smooth", True)),
         "root_smooth": bool(engine.get("root_smooth", False)),
+        "kalman": bool(engine.get("kalman", True)),
+        "kalman_interval": float(engine.get("kalman_interval", 0.45)),
+        "kalman_noise": float(engine.get("kalman_noise", 0.4)),
+        "lowpass": bool(engine.get("lowpass", True)),
+        "lowpass_order": int(engine.get("lowpass_order", 7)),
+        "lowpass_smooth": float(engine.get("lowpass_smooth", 0.9)),
+        "one_euro": bool(engine.get("one_euro", True)),
+        "one_euro_min_cutoff": float(engine.get("one_euro_min_cutoff", 3.5)),
+        "one_euro_beta": float(engine.get("one_euro_beta", 0.005)),
+        "one_euro_d_cutoff": float(engine.get("one_euro_d_cutoff", 1.2)),
         "flip_video": bool(engine.get("flip_video", True)),
         "scale": float(engine.get("scale") or 0.01),
         "camera_index": int(engine.get("camera_index") or 0),
@@ -853,12 +863,15 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
 
         def runner(task: SetupTask):
             root.mkdir(parents=True, exist_ok=True)
-            task.log(f"写入引擎源码模板（{templates}）…")
+            task.log("检查内置 TDPT 源码…")
             for name in ("tdpt_vnect.py", "demo.py", "requirements.txt"):
                 src = templates / name
                 if not src.is_file():
                     raise RuntimeError(f"缺少 TDPT 源码模板: {src}")
-                shutil.copyfile(src, root / name)
+                # The built-in runner lives in the template directory itself.
+                # Retain this guard for callers that supply another root.
+                if src.resolve() != (root / name).resolve():
+                    shutil.copyfile(src, root / name)
             venv_python = _ensure_venv(task, root, cfg["engines"]["tdpt"].get("base_python", "python"))
             task.log("升级 pip…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
