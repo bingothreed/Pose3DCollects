@@ -81,6 +81,19 @@ export function initSettings() {
     if (button) openModelPath(button.dataset.openPath);
   });
 
+  $("#tdptSaveBtn").addEventListener("click", () => saveTdpt(true));
+  $("#tdptEnvBtn").addEventListener("click", () => startSetup("tdpt", "env"));
+  $("#tdptDownloadBtn").addEventListener("click", () => startSetup("tdpt", "models"));
+  $("#tdptCameraBtn").addEventListener("click", toggleTdptCamera);
+  $("#tdptOpenModels").addEventListener("click", () => openEngineModels("tdpt"));
+  $("#copyTdptModels").addEventListener("click", () => copyPath(
+    state.engines?.tdpt?.models_dir || $("#tdptModelsDir").value.trim()));
+  $("#tdptOpenRoot").addEventListener("click", () => openFolder("tdpt", "root"));
+  $("#tdptModels").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-path]");
+    if (button) openModelPath(button.dataset.openPath);
+  });
+
   $("#saveDefaultsBtn").addEventListener("click", saveDefaults);
   $("#stopSetupBtn").addEventListener("click", stopSetup);
   $("#closeSetupLog").addEventListener("click", () => show($("#setupLogCard"), false));
@@ -99,16 +112,17 @@ export function initSettings() {
 }
 
 export function syncSettingsEngine() {
-  const engine = ["instanthmr", "flowhmr", "gemx"].includes(state.engine)
+  const engine = ["instanthmr", "flowhmr", "gemx", "tdpt"].includes(state.engine)
     ? state.engine : "instanthmr";
   show($("#instantCard"), engine === "instanthmr");
   show($("#flowCard"), engine === "flowhmr");
   show($("#gemxCard"), engine === "gemx");
+  show($("#tdptCard"), engine === "tdpt");
   show($("#poseFilterField"), engine === "instanthmr");
   show($("#instantSmoothField"), engine === "instanthmr");
   show($("#flowManualField"), engine === "flowhmr");
   show($("#flowStaticField"), engine === "flowhmr");
-  const label = { instanthmr: "InstantHMR", flowhmr: "FlowHMR", gemx: "GEM-X" }[engine];
+  const label = { instanthmr: "InstantHMR", flowhmr: "FlowHMR", gemx: "GEM-X", tdpt: "TDPT" }[engine];
   const text = $("#settingsContextText");
   if (text) text.innerHTML = t("settings.context", { engine: label });
   const context = $("#settingsContext");
@@ -127,6 +141,8 @@ function setupTitle(title) {
   if (title.startsWith("检查 FlowHMR 环境")) return t("setup.title.checkFlow");
   if (title.startsWith("准备 GEM-X 环境")) return t("setup.title.prepareGemx");
   if (title.startsWith("下载 GEM-X 模型")) return t("setup.title.downloadGemx");
+  if (title.startsWith("准备 TDPT 环境")) return t("setup.title.prepareTdpt");
+  if (title.startsWith("下载 TDPT 模型")) return t("setup.title.downloadTdpt");
   if (title.startsWith("下载 InstantHMR · ")) {
     return t("setup.title.downloadInstant", { model: title.split("·").pop().trim() });
   }
@@ -177,6 +193,17 @@ export function populateForms() {
   $("#gemxPoseFp16").value = String(Boolean(gemx.pose_fp16));
   $("#gemxProxy").value = gemx.proxy || "";
 
+  const tdpt = cfg.engines.tdpt;
+  $("#tdptRoot").value = tdpt.root || "";
+  $("#tdptPython").value = tdpt.python || "";
+  $("#tdptModelsDir").value = tdpt.models_dir || "";
+  $("#tdptBasePython").value = tdpt.base_python || "python";
+  $("#tdptCameraIndex").value = tdpt.camera_index ?? 0;
+  $("#tdptSmooth").value = String(Boolean(tdpt.smooth));
+  $("#tdptFlipVideo").value = String(Boolean(tdpt.flip_video));
+  $("#tdptScale").value = Number(tdpt.scale ?? 0.01);
+  $("#tdptProxy").value = tdpt.proxy || "";
+
   $("#defaultMaxFrames").value = cfg.job?.max_frames ?? 300;
   $("#poseFilter").value = inst.pose_filter || "one-euro";
   $("#instantSmooth").checked = Boolean(inst.smooth);
@@ -190,6 +217,7 @@ export function updateEngineStatus(engines) {
   renderInstant(engines.instanthmr);
   renderFlow(engines.flowhmr);
   renderGemx(engines.gemx);
+  renderTdpt(engines.tdpt);
 }
 
 function renderInstant(status) {
@@ -394,6 +422,122 @@ function renderGemx(status) {
     } else {
       hint.textContent = t("settings.gemx.hint.ready");
     }
+  }
+}
+
+function renderTdpt(status) {
+  if (!status) return;
+  statusChip($("#tdptReadyChip"), status.ready, t("settings.ready"), t("settings.notReady"));
+  const missing = Object.entries(status.deps || {}).filter(([, ok]) => !ok).map(([name]) => name);
+  const checks = [
+    checkRow(t("settings.checks.project"), status.root_ok, shorten(status.root)),
+    checkRow(t("settings.checks.python"), status.python_ok,
+      status.python_version || shorten(status.python) || t("settings.detail.notCreated")),
+    checkRow(t("settings.checks.deps"), status.deps_ok,
+      missing.length ? t("settings.detail.missingDeps", { items: missing.join(", ") })
+        : "onnxruntime / opencv / numpy"),
+    checkRow(t("settings.checks.core"), status.model_ok, status.model || ""),
+  ];
+  $("#tdptChecks").innerHTML = checks.join("");
+  const pathEl = $("#tdptModelsPath");
+  if (pathEl) {
+    pathEl.textContent = status.models_dir || "—";
+    pathEl.title = status.models_dir || "";
+  }
+
+  $("#tdptModels").innerHTML = (status.models || []).map((model) => `
+    <div class="model-row">
+      <div class="model-main">
+        <div class="model-title">${escapeHtml(model.label)}
+          ${model.required ? `<span class="chip">${escapeHtml(t("settings.required"))}</span>` : ""}</div>
+        <div class="model-file" title="${escapeHtml(model.path)}">${escapeHtml(shorten(model.path, 72))}</div>
+      </div>
+      <span class="model-state ${model.exists ? "ok" : "bad"}">${model.exists ? fmtBytes(model.size) : t("settings.model.missing")}</span>
+      <button type="button" class="link-btn" data-open-path="${escapeHtml(model.path)}"
+        title="${escapeHtml(t("settings.model.openDir"))}: ${escapeHtml(model.path)}">${t("settings.model.openDir")}</button>
+    </div>
+  `).join("");
+
+  const busy = Boolean(status.setup_running);
+  $("#tdptEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
+  $("#tdptEnvBtn").disabled = busy;
+  $("#tdptDownloadBtn").disabled = busy || !status.python_ok;
+
+  const camera = status.camera || {};
+  const running = camera.status === "running";
+  const cameraBtn = $("#tdptCameraBtn");
+  if (cameraBtn) {
+    cameraBtn.textContent = running ? t("settings.cameraStop") : t("settings.cameraOpen");
+    cameraBtn.disabled = busy || (!status.ready && !running);
+    cameraBtn.title = camera.status === "error" ? (camera.message || "") : "";
+  }
+  const cameraHint = $("#tdptCameraHint");
+  if (cameraHint) {
+    if (running) {
+      cameraHint.textContent = t("settings.cameraRunning", { index: camera.camera_index ?? 0 });
+    } else if (camera.status === "error") {
+      cameraHint.textContent = t("settings.cameraError");
+    } else {
+      cameraHint.textContent = t("settings.tdpt.cameraHint");
+    }
+  }
+}
+
+async function saveTdpt(notify) {
+  const payload = {
+    engines: {
+      tdpt: {
+        root: $("#tdptRoot").value.trim(),
+        python: $("#tdptPython").value.trim(),
+        models_dir: $("#tdptModelsDir").value.trim(),
+        base_python: $("#tdptBasePython").value.trim(),
+        camera_index: Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0)),
+        smooth: $("#tdptSmooth").value === "true",
+        flip_video: $("#tdptFlipVideo").value === "true",
+        scale: Math.max(0.0001, Number($("#tdptScale").value) || 0.01),
+        proxy: $("#tdptProxy").value.trim(),
+      },
+    },
+  };
+  try {
+    const result = await api.saveConfig(payload);
+    state.config = result.config;
+    state.engines = result.engines;
+    updateEngineStatus(result.engines);
+    populateForms();
+    emit("config", result.config);
+    emit("engines", result.engines);
+    if (notify) toast(t("settings.toast.savedTdpt"), "success");
+    return true;
+  } catch (error) {
+    toast(error.message, "error");
+    return false;
+  }
+}
+
+async function toggleTdptCamera() {
+  const camera = state.engines?.tdpt?.camera || {};
+  const button = $("#tdptCameraBtn");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    if (camera.status === "running") {
+      await api.stopTdptCamera();
+      toast(t("settings.toast.cameraStopped"), "success");
+    } else {
+      const saved = await saveTdpt(false);
+      if (!saved) return;
+      const index = Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0));
+      toast(t("settings.toast.cameraStarting"), "info");
+      await api.startTdptCamera({ camera_index: index });
+      toast(t("settings.toast.cameraStarted", { index }), "success");
+    }
+    await refreshEngines();
+  } catch (error) {
+    toast(error.message, "error", 8000);
+    await refreshEngines();
+  } finally {
+    button.disabled = false;
   }
 }
 

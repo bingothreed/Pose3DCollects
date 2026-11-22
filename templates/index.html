@@ -47,6 +47,11 @@
       <span class="engine-name">GEM-X</span>
       <small data-i18n="engine.picker.gemx">全身姿态 · SOMA</small>
     </button>
+    <button type="button" class="engine-btn" data-engine="tdpt">
+      <span class="engine-dot"></span>
+      <span class="engine-name">TDPT</span>
+      <small data-i18n="engine.picker.tdpt">实时 · 3D 骨架</small>
+    </button>
   </div>
 
   <div class="topbar-actions">
@@ -212,6 +217,17 @@
 
           <div class="hidden" id="gemxPrecisionFields">
             <p class="hint precision-hint" id="gemxPrecisionHint" data-i18n="job.precision.gemxHint">逐帧 Body Pose · 单人物（自动跟踪）· 相机坐标系；设备与检测器在「设置与资源」里配置。</p>
+          </div>
+
+          <div class="hidden" id="tdptPrecisionFields">
+            <p class="hint precision-hint" data-i18n="job.precision.tdptHint">VNect 单帧 3D 骨架（24+4 关节）· CPU 极速；垂直翻转与平滑在「设置与资源」里配置。</p>
+            <label class="enhance-item">
+              <input type="checkbox" id="tdptSmoothJob" checked>
+              <span>
+                <strong data-i18n="settings.smooth">输出平滑（1€ 滤波）</strong>
+                <small data-i18n="settings.smoothHint">平滑关键点、网格和位移，减少抖动；快速动作可能略滞后</small>
+              </span>
+            </label>
           </div>
 
           <div class="enhance-grid" id="flowEnhanceFields">
@@ -457,6 +473,70 @@
           <button type="button" class="btn ghost" id="gemxOpenRoot" data-i18n="settings.openProject">打开项目目录</button>
         </div>
         <p class="hint" id="gemxHint" data-i18n="settings.gemx.hint">首次使用：先「自动配置环境」（有 NVIDIA 显卡会自动安装 CUDA 版 PyTorch，约 2.9 GB），再「自动下载模型」。推理需要约 6 GB 显存（CPU 也可以，但很慢）。</p>
+      </section>
+
+      <section class="card settings-card" id="tdptCard">
+        <div class="card-head">
+          <div>
+            <h2>TDPT</h2>
+            <p><span data-i18n="settings.tdpt.subtitle">VNect · 独立虚拟环境</span><span class="mode-badge hybrid" data-i18n="mode.hybrid" data-i18n-title="mode.instantTitle">实时 + 离线</span></p>
+          </div>
+          <div class="head-actions">
+            <span class="chip" id="tdptReadyChip" data-i18n="engine.detecting">检测中…</span>
+          </div>
+        </div>
+        <div class="status-rows" id="tdptChecks"></div>
+        <div class="model-location">
+          <div class="model-location-main">
+            <span class="model-location-label" data-i18n="settings.location.tdpt">模型放置位置</span>
+            <code class="model-location-path" id="tdptModelsPath">—</code>
+          </div>
+          <div class="model-location-actions">
+            <button type="button" class="btn ghost" id="copyTdptModels" data-i18n="settings.copyPath">复制路径</button>
+            <button type="button" class="btn ghost" id="tdptOpenModels" data-i18n="settings.openFolder">打开文件夹</button>
+          </div>
+        </div>
+        <p class="model-location-note" data-i18n="settings.tdpt.locationNote">模型目标位置见下表（来自 digital-standard/ThreeDPoseTracker 公共仓库）；点行尾「打开目录」可直接打开或创建文件夹，或用「自动下载模型」一键获取（约 33 MB）。</p>
+        <div class="model-table" id="tdptModels"></div>
+        <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="tdptRoot" placeholder="TDPT 根目录" data-i18n-placeholder="settings.tdptRootPlaceholder"></label>
+          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="tdptPython" placeholder=".venv\Scripts\python.exe"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.modelsDir">模型目录</span><input type="text" id="tdptModelsDir" placeholder="TDPT/models"></label>
+          <label class="field"><span data-i18n="settings.basePython">基础 Python</span><input type="text" id="tdptBasePython" placeholder="python 或 py -3.12" data-i18n-placeholder="settings.basePythonPlaceholder"></label>
+          <label class="field"><span data-i18n="settings.cameraIndex">摄像头编号</span><input type="number" id="tdptCameraIndex" min="0" max="15" step="1"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.smoothing">输出平滑（1€ 滤波）</span>
+            <select id="tdptSmooth">
+              <option value="true" data-i18n="settings.on">开</option>
+              <option value="false" data-i18n="settings.off">关</option>
+            </select>
+          </label>
+          <label class="field"><span data-i18n="settings.tdpt.flip">视频输入垂直翻转</span>
+            <select id="tdptFlipVideo">
+              <option value="true" data-i18n="settings.on">开</option>
+              <option value="false" data-i18n="settings.off">关</option>
+            </select>
+            <small data-i18n="settings.tdpt.flipHint">通常关闭；仅当画面上下颠倒时开启</small>
+          </label>
+          <label class="field"><span data-i18n="settings.tdpt.scale">输出缩放</span><input type="number" id="tdptScale" min="0.0001" step="0.001">
+            <small data-i18n="settings.tdpt.scaleHint">模型单位 × 缩放 = 场景单位（默认 0.01 ≈ 米制）</small>
+          </label>
+          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="tdptProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn primary" id="tdptSaveBtn" data-i18n="settings.saveTdpt">保存并检测</button>
+          <button type="button" class="btn" id="tdptEnvBtn" data-i18n="settings.env"
+            data-i18n-title="settings.envTitle">自动配置环境</button>
+          <button type="button" class="btn" id="tdptDownloadBtn" data-i18n="settings.downloadPublic">自动下载模型</button>
+          <span class="mode-badge realtime" data-i18n="mode.realtime" data-i18n-title="mode.realtimeTitle">实时</span>
+          <button type="button" class="btn" id="tdptCameraBtn" data-i18n="settings.cameraOpen">打开实时摄像头</button>
+          <button type="button" class="btn ghost" id="tdptOpenRoot" data-i18n="settings.openProject">打开项目目录</button>
+        </div>
+        <p class="hint" id="tdptHint" data-i18n="settings.tdpt.hint">首次使用：先「自动配置环境」（依赖走阿里云镜像），再「自动下载模型」。CPU 即可实时运行。</p>
+        <p class="hint" id="tdptCameraHint" data-i18n="settings.tdpt.cameraHint">逐帧实时推理（不录制），结果以骨架叠加显示在 OpenCV 窗口中（绿点=置信度高）；关闭窗口或点「关闭实时摄像头」结束。</p>
       </section>
 
       <section class="card settings-card" id="flowCard">

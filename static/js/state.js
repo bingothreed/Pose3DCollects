@@ -1,7 +1,7 @@
 const listeners = new Map();
 
 const storedEngine = localStorage.getItem("p3d.engine");
-const KNOWN_ENGINES = new Set(["instanthmr", "flowhmr", "gemx"]);
+const KNOWN_ENGINES = new Set(["instanthmr", "flowhmr", "gemx", "tdpt"]);
 
 export const state = {
   config: null,

@@ -42,6 +42,14 @@ def _gemx_candidates() -> list[Path]:
     ]
 
 
+def _tdpt_candidates() -> list[Path]:
+    return [
+        PARENT_DIR / "TDPT",
+        BASE_DIR / "TDPT",
+        PARENT_DIR / "ThreeDPoseTracker",
+    ]
+
+
 def _flow_candidates() -> list[Path]:
     candidates = [
         PARENT_DIR / "FlowHMR-Windows" / "FlowHMR",
@@ -78,6 +86,7 @@ def _defaults() -> dict:
     instant_root = _first_dir(_instant_candidates())
     flow_root = _first_dir(_flow_candidates())
     gemx_root = _first_dir(_gemx_candidates())
+    tdpt_root = _first_dir(_tdpt_candidates())
     return {
         "app": {
             "name": "Pose3D Collects",
@@ -126,6 +135,19 @@ def _defaults() -> dict:
                 "pose_fp16": True,
                 "proxy": "http://127.0.0.1:21882",
             },
+            "tdpt": {
+                "root": str(tdpt_root),
+                "python": venv_python(tdpt_root),
+                "base_python": "python",
+                "models_dir": str(tdpt_root / "models"),
+                "model": "MobileNet3D3_6.onnx",
+                "device": "cpu",
+                "smooth": True,
+                "flip_video": False,
+                "scale": 0.01,
+                "camera_index": 0,
+                "proxy": "http://127.0.0.1:21882",
+            },
         },
         "ffmpeg": "",
     }
@@ -154,7 +176,8 @@ def load_config() -> dict:
         if isinstance(stored, dict):
             _merge(cfg, stored)
     # Refresh auto-detected values when the stored ones are empty or stale.
-    for engine, key in (("instanthmr", "python"), ("flowhmr", "python"), ("gemx", "python")):
+    for engine, key in (("instanthmr", "python"), ("flowhmr", "python"),
+                        ("gemx", "python"), ("tdpt", "python")):
         if not cfg["engines"][engine].get(key):
             root = Path(cfg["engines"][engine]["root"])
             cfg["engines"][engine][key] = flow_python(root) if engine == "flowhmr" else venv_python(root)

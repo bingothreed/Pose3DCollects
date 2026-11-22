@@ -8,7 +8,7 @@ import { initI18n, t, getLang, toggleLang, onLanguageChange } from "./i18n.js";
 
 const ALLOWED = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg", ".wmv"]);
 const TERMINAL = new Set(["done", "error", "cancelled"]);
-const ENGINE_LABEL = { instanthmr: "InstantHMR", flowhmr: "FlowHMR", gemx: "GEM-X" };
+const ENGINE_LABEL = { instanthmr: "InstantHMR", flowhmr: "FlowHMR", gemx: "GEM-X", tdpt: "TDPT" };
 const FLOW_MODEL_KEYS = {
   "FlowHMR 主模型": "flowModel.main",
   "主模型配置": "flowModel.config",
@@ -117,7 +117,7 @@ async function init() {
     const themeParam = query.get("theme");
     if (themeParam === "light" || themeParam === "dark") applyTheme(themeParam, true);
     const engineParam = query.get("engine");
-    if (["instanthmr", "flowhmr", "gemx"].includes(engineParam)) setEngine(engineParam);
+    if (["instanthmr", "flowhmr", "gemx", "tdpt"].includes(engineParam)) setEngine(engineParam);
     updateEngineUI();
     await refreshJobs();
     const jobParam = query.get("job");
@@ -213,9 +213,11 @@ function refreshLanguage() {
   }
   if (trackState.loaded && state.currentJob) {
     const hasSkeleton = overlay.hasSkeleton();
+    const engine = state.currentJob.engine;
     $("#overlayNote").textContent = hasSkeleton
-      ? (state.currentJob.engine === "gemx" ? t("video.overlay.gemx") : t("video.overlay.instant"))
-      : state.currentJob.engine === "flowhmr" ? t("video.overlay.flow") : "";
+      ? (engine === "gemx" ? t("video.overlay.gemx")
+        : engine === "tdpt" ? t("video.overlay.tdpt") : t("video.overlay.instant"))
+      : engine === "flowhmr" ? t("video.overlay.flow") : "";
   } else if (state.currentJob) {
     $("#overlayNote").textContent = state.currentJob.status === "done"
       ? t("video.overlay.none") : t("video.overlay.reading");
@@ -302,6 +304,8 @@ function initPrecisionDefaults() {
   if (fitEl) fitEl.value = String(inst.fit ?? 2);
   const smoothEl = $("#instantSmoothJob");
   if (smoothEl) smoothEl.checked = Boolean(inst.smooth);
+  const tdptSmoothEl = $("#tdptSmoothJob");
+  if (tdptSmoothEl) tdptSmoothEl.checked = Boolean(state.config.engines?.tdpt?.smooth ?? true);
   setFlowStepsValue(Number(state.config.engines?.flowhmr?.steps) || 20);
   precisionInitialized = true;
 }
@@ -334,6 +338,7 @@ function updatePrecisionUI() {
   show($("#instantSmoothJobFields"), instant);
   show($("#flowPrecisionFields"), flow);
   show($("#gemxPrecisionFields"), state.engine === "gemx");
+  show($("#tdptPrecisionFields"), state.engine === "tdpt");
   const hint = $("#instantPrecisionHint");
   if (instant && hint) {
     const variant = selectedInstantVariant();
@@ -412,6 +417,8 @@ function updateEngineHint() {
         device: status.device,
         backend: status.cuda_ok ? "CUDA" : "CPU",
       });
+    } else if (state.engine === "tdpt") {
+      hint.textContent = t("job.readyTdpt");
     } else {
       const service = status.server?.status === "running" ? t("job.serviceRunning") : t("job.serviceAuto");
       hint.textContent = t("job.readyFlow", { service, port: status.port });
@@ -431,6 +438,9 @@ function updateEngineHint() {
     for (const model of status.models || []) {
       if (model.required && !model.exists) missing.push(model.label);
     }
+  } else if (state.engine === "tdpt") {
+    if (!status.deps_ok) missing.push(t("settings.checks.deps"));
+    if (!status.model_ok) missing.push(status.model || t("settings.checks.core"));
   } else {
     if (status.inference_runtime && !status.inference_runtime.installed) {
       missing.push(t("settings.checks.inferenceRuntime"));
@@ -538,6 +548,8 @@ async function startJob() {
         torsoOpt: $("#flowTorso").checked,
         crossing: $("#flowCrossing").checked,
       }
+    : engine === "tdpt"
+    ? { smooth: $("#tdptSmoothJob").checked }
     : {};
   uploading = true;
   show($("#uploadProgress"), true);
@@ -766,7 +778,8 @@ async function ensureTrack(job) {
     const hasSkeleton = overlay.hasSkeleton();
     show($("#legendSkeleton"), hasSkeleton);
     $("#overlayNote").textContent = hasSkeleton
-      ? (job.engine === "gemx" ? t("video.overlay.gemx") : t("video.overlay.instant"))
+      ? (job.engine === "gemx" ? t("video.overlay.gemx")
+        : job.engine === "tdpt" ? t("video.overlay.tdpt") : t("video.overlay.instant"))
       : job.engine === "flowhmr" ? t("video.overlay.flow") : "";
     if (job.engine === "flowhmr" && flowVideoReadyJob !== job.id) {
       // Detection finished, so the engine now serves its 30 fps analysis video;
@@ -868,7 +881,7 @@ function renderJobs() {
       <div class="job-item-main">
         <div class="job-item-title" title="${escapeHtml(job.filename)}">${escapeHtml(job.filename)}</div>
         <div class="job-item-meta">
-          <span class="job-engine-tag ${job.engine}">${job.engine === "flowhmr" ? "FLOWHMR" : job.engine === "gemx" ? "GEM-X" : "INSTANT"}</span>
+          <span class="job-engine-tag ${job.engine}">${job.engine === "flowhmr" ? "FLOWHMR" : job.engine === "gemx" ? "GEM-X" : job.engine === "tdpt" ? "TDPT" : "INSTANT"}</span>
           <span>${statusLabel(status)}</span>
           <span>${escapeHtml(frames)}${fmtDate(job.created)}</span>
         </div>

@@ -79,5 +79,8 @@ export const stopFlowService = () => postJson("/api/flowhmr/stop", {});
 export const startInstantCamera = (payload = {}) => postJson("/api/instanthmr/camera/start", payload);
 export const stopInstantCamera = () => postJson("/api/instanthmr/camera/stop", {});
 
+export const startTdptCamera = (payload = {}) => postJson("/api/tdpt/camera/start", payload);
+export const stopTdptCamera = () => postJson("/api/tdpt/camera/stop", {});
+
 export const openFolder = (engine, which) => postJson("/api/open-folder", { engine, which });
 export const openPath = (path) => postJson("/api/open-path", { path });

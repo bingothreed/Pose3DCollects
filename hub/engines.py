@@ -24,6 +24,10 @@ INSTANT_MODULES = ["onnxruntime", "cv2", "numpy", "rfdetr"]
 INSTANT_DOWNLOAD_MODULES = ["huggingface_hub"]
 
 GEMX_MODULES = ["torch", "cv2", "numpy", "onnxruntime", "transformers", "soma", "gem"]
+
+TDPT_MODULES = ["onnxruntime", "cv2", "numpy"]
+TDPT_MODEL_URL = ("https://raw.githubusercontent.com/digital-standard/ThreeDPoseTracker/"
+                  "master/Assets/Model/MobileNet3D3_6.onnx")
 GEMX_SOMA_FILES = [
     "SOMA_neutral.npz",
     "SOMA_template_rig.usda",
@@ -467,9 +471,66 @@ def gemx_status(cfg: dict) -> dict:
     }
 
 
+def tdpt_python(cfg: dict) -> str:
+    engine = cfg["engines"]["tdpt"]
+    python = engine.get("python") or ""
+    if python and Path(python).is_file():
+        return python
+    detected = cfgmod.venv_python(Path(engine["root"]))
+    return detected or python
+
+
+def tdpt_model_path(cfg: dict) -> Path:
+    engine = cfg["engines"]["tdpt"]
+    models_dir = Path(engine.get("models_dir") or Path(engine["root"]) / "models")
+    return models_dir / (engine.get("model") or "MobileNet3D3_6.onnx")
+
+
+def tdpt_status(cfg: dict) -> dict:
+    engine = cfg["engines"]["tdpt"]
+    root = Path(engine["root"])
+    python = tdpt_python(cfg)
+    models_dir = Path(engine.get("models_dir") or root / "models")
+    model_path = tdpt_model_path(cfg)
+    root_ok = root.is_dir()
+    python_ok = bool(python) and Path(python).is_file()
+    deps = check_modules(python, TDPT_MODULES) if python_ok else {m: False for m in TDPT_MODULES}
+    deps_ok = python_ok and all(deps.values())
+    model_info = file_info(model_path)
+    ready = root_ok and python_ok and deps_ok and model_info["exists"]
+    return {
+        "id": "tdpt",
+        "name": "TDPT",
+        "subtitle": "VNect · 轻量实时 3D 骨架",
+        "root": str(root),
+        "python": python,
+        "python_version": python_version(python) if python_ok else "",
+        "models_dir": str(models_dir),
+        "model": engine.get("model") or "MobileNet3D3_6.onnx",
+        "model_path": str(model_path),
+        "device": engine.get("device", "cpu"),
+        "smooth": bool(engine.get("smooth", True)),
+        "flip_video": bool(engine.get("flip_video", True)),
+        "scale": float(engine.get("scale") or 0.01),
+        "camera_index": int(engine.get("camera_index") or 0),
+        "proxy": str(engine.get("proxy") or ""),
+        "root_ok": root_ok,
+        "python_ok": python_ok,
+        "deps": deps,
+        "deps_ok": deps_ok,
+        "models": [_model_row("TDPT (VNect) 模型", model_path, True, "MobileNet3D3_6.onnx（约 33 MB）")],
+        "model_ok": model_info["exists"],
+        "ready": ready,
+        "env_kind": "venv" if python_ok else ("project" if root_ok else "missing"),
+        "can_create_env": root_ok,
+        "can_download_models": python_ok,
+        "setup_running": None,
+    }
+
+
 def all_status(cfg: dict, server_status: dict | None = None) -> dict:
     return {"instanthmr": instant_status(cfg), "flowhmr": flow_status(cfg, server_status),
-            "gemx": gemx_status(cfg)}
+            "gemx": gemx_status(cfg), "tdpt": tdpt_status(cfg)}
 
 
 # --------------------------------------------------------------------------- setup tasks
@@ -767,6 +828,37 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
 
         return manager.start("准备 GEM-X 环境", engine, runner, success)
 
+    if engine == "tdpt":
+        root = Path(cfg["engines"]["tdpt"]["root"])
+        if not root.is_dir():
+            raise RuntimeError(f"TDPT 目录不存在: {root}")
+        mirror = "https://mirrors.aliyun.com/pypi/simple/"
+
+        def runner(task: SetupTask):
+            venv_python = _ensure_venv(task, root, cfg["engines"]["tdpt"].get("base_python", "python"))
+            task.log("升级 pip…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
+                             "-i", mirror], cwd=root)
+            task.log("安装 requirements.txt（onnxruntime / opencv / numpy，走阿里云镜像）…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install",
+                             "-i", mirror, "-r", "requirements.txt"], cwd=root)
+            task.log("校验运行依赖…")
+            clear_caches()
+            deps = check_modules(str(venv_python), TDPT_MODULES, ttl=0)
+            missing = [name for name, ok in deps.items() if not ok]
+            if missing:
+                raise RuntimeError("依赖校验未通过，缺少: " + ", ".join(missing))
+            task.log("依赖校验通过: " + " / ".join(TDPT_MODULES))
+            task.log("环境准备完成。接下来请用「自动下载模型」获取权重。")
+
+        def success(task: SetupTask):
+            venv_python = _venv_python(root)
+            if venv_python.is_file():
+                update_config(lambda c: c["engines"]["tdpt"].__setitem__("python", str(venv_python)))
+            clear_caches()
+
+        return manager.start("准备 TDPT 环境", engine, runner, success)
+
     raise RuntimeError(f"unknown engine: {engine}")
 
 
@@ -842,5 +934,23 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
             task.log("模型下载完成。")
 
         return manager.start("下载 GEM-X 模型（约 4.1 GB）", engine, runner)
+
+    if engine == "tdpt":
+        eng = cfg["engines"]["tdpt"]
+        root = Path(eng["root"])
+        python = tdpt_python(cfg)
+        if not python or not Path(python).is_file():
+            raise RuntimeError("TDPT 虚拟环境不存在，请先创建环境")
+        models_dir = Path(eng.get("models_dir") or root / "models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        worker = cfgmod.BASE_DIR / "workers" / "download_tdpt_models.py"
+        proxy = str(eng.get("proxy") or "").strip()
+
+        def runner(task: SetupTask):
+            _run_step(task, [python, str(worker), "--models-dir", str(models_dir),
+                             "--proxy", proxy], cwd=root)
+            task.log("模型下载完成。")
+
+        return manager.start("下载 TDPT 模型（约 33 MB）", engine, runner)
 
     raise RuntimeError(f"unknown engine: {engine}")
