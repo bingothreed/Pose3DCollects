@@ -279,8 +279,11 @@ function renderInstant(status) {
     </div>`;
   });
   $("#instantModels").innerHTML = rows.join("") || `<p class="muted small">${escapeHtml(t("settings.model.none"))}</p>`;
-  $("#instantEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
-  $("#instantEnvBtn").disabled = busy;
+  const envReady = status.root_ok && status.python_ok && status.deps_ok;
+  const envBtn = $("#instantEnvBtn");
+  envBtn.textContent = busy ? t("settings.preparing") : envReady ? t("settings.envReady") : t("settings.env");
+  envBtn.disabled = busy || envReady;
+  envBtn.classList.toggle("primary", !busy && !envReady);
 
   const camera = status.camera || {};
   const running = camera.status === "running";
@@ -366,9 +369,14 @@ function renderFlow(status) {
     button.textContent = t("settings.startService");
     button.disabled = !status.root_ok || !status.python_ok;
   }
-  $("#flowEnvBtn").disabled = busy;
+  const flowEnvReady = (status.root_ok && status.python_ok
+    && status.deps_ok !== false
+    && (!status.inference_runtime || status.inference_runtime.installed));
+  const flowEnvBtn = $("#flowEnvBtn");
+  flowEnvBtn.disabled = busy || flowEnvReady;
+  flowEnvBtn.textContent = busy ? t("settings.preparing") : flowEnvReady ? t("settings.envReady") : t("settings.env");
+  flowEnvBtn.classList.toggle("primary", !busy && !flowEnvReady);
   $("#flowDownloadBtn").disabled = busy || !status.can_download_models;
-  $("#flowEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
 
   const manual = $("#flowManualSelect");
   const manualNote = $("#flowManualNote");
@@ -432,8 +440,11 @@ function renderGemx(status) {
   `).join("");
 
   const busy = Boolean(status.setup_running);
-  $("#gemxEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
-  $("#gemxEnvBtn").disabled = busy;
+  const gemxEnvReady = status.root_ok && status.python_ok && status.deps_ok;
+  const gemxEnvBtn = $("#gemxEnvBtn");
+  gemxEnvBtn.textContent = busy ? t("settings.preparing") : gemxEnvReady ? t("settings.envReady") : t("settings.env");
+  gemxEnvBtn.disabled = busy || gemxEnvReady;
+  gemxEnvBtn.classList.toggle("primary", !busy && !gemxEnvReady);
   $("#gemxDownloadBtn").disabled = busy || !status.python_ok;
   const hint = $("#gemxHint");
   if (hint) {
@@ -483,8 +494,11 @@ function renderTdpt(status) {
   `).join("");
 
   const busy = Boolean(status.setup_running);
-  $("#tdptEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
-  $("#tdptEnvBtn").disabled = busy;
+  const tdptEnvReady = status.root_ok && status.python_ok && status.deps_ok;
+  const tdptEnvBtn = $("#tdptEnvBtn");
+  tdptEnvBtn.textContent = busy ? t("settings.preparing") : tdptEnvReady ? t("settings.envReady") : t("settings.env");
+  tdptEnvBtn.disabled = busy || tdptEnvReady;
+  tdptEnvBtn.classList.toggle("primary", !busy && !tdptEnvReady);
   $("#tdptDownloadBtn").disabled = busy || !status.python_ok;
 
   const camera = status.camera || {};
@@ -720,6 +734,10 @@ async function toggleInstantCamera() {
   } finally {
     button.disabled = false;
   }
+}
+
+export function startEngineSetup(engine) {
+  return startSetup(engine, "env");
 }
 
 async function startSetup(engine, kind) {

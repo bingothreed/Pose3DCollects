@@ -47,7 +47,7 @@ The **EN / 中** button in the top bar switches between Chinese and English, and
 
 ## First-Time Engine Setup
 
-Open **Settings & Resources** at the top; the page only shows the engine currently selected in the top bar. Switch engines in the top bar to view its environment, models and settings. Model directories default to the vendored engine folders and stay editable; each model folder contains a tracked `README.md` describing the expected files.
+Open **Settings & Resources** at the top; the page only shows the engine currently selected in the top bar. Switch engines in the top bar to view its environment, models and settings. Model directories default to the vendored engine folders and stay editable; each model folder contains a tracked `README.md` describing the expected files. When an engine/model is selected, the job panel and settings card show which environment pieces are missing; an **Auto-configure environment** button appears only while the environment is incomplete (it changes to **Environment ready** afterwards).
 
 ### InstantHMR
 

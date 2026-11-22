@@ -3,7 +3,7 @@ import { state, on, setEngine } from "./state.js";
 import { $, $$, show, fmtBytes, fmtDate, toast, statusLabel, escapeHtml } from "./utils.js";
 import { VideoOverlay } from "./overlay.js";
 import { MeshViewer } from "./viewer.js";
-import { initSettings, updateEngineStatus, populateForms } from "./settings.js";
+import { initSettings, updateEngineStatus, populateForms, startEngineSetup } from "./settings.js";
 import { initI18n, t, getLang, toggleLang, onLanguageChange } from "./i18n.js";
 
 const ALLOWED = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg", ".wmv"]);
@@ -250,6 +250,10 @@ function bindEnginePicker() {
       setTab("settings");
     }
   });
+  $("#engineAutoSetup").addEventListener("click", async () => {
+    setTab("settings");
+    await startEngineSetup(state.engine);
+  });
 }
 
 function updateEngineUI() {
@@ -291,7 +295,10 @@ const ENHANCE_REASONS = {
 
 function bindPrecisionControls() {
   for (const id of ["instantTierJob", "instantFitJob", "flowStepsJob"]) {
-    $(`#${id}`)?.addEventListener("change", updatePrecisionUI);
+    $(`#${id}`)?.addEventListener("change", () => {
+      updatePrecisionUI();
+      updateEngineHint();
+    });
   }
 }
 
@@ -398,17 +405,26 @@ function updateEnhanceUI() {
 
 function updateEngineHint() {
   const hint = $("#engineHint");
+  const setupBtn = $("#engineAutoSetup");
   const status = state.engines?.[state.engine];
   if (!status) {
     hint.className = "hint";
     hint.textContent = t("job.detectingEngine");
+    show(setupBtn, false);
     return;
   }
-  if (status.job_ready ?? status.ready) {
+  const envReady = Boolean(
+    status.root_ok && status.python_ok && status.deps_ok !== false
+    && (!status.inference_runtime || status.inference_runtime.installed)
+  );
+  show(setupBtn, !envReady);
+  const instantVariant = state.engine === "instanthmr" ? selectedInstantVariant() : null;
+  const variantMissing = Boolean(instantVariant && !instantVariant.exists);
+  if ((status.job_ready ?? status.ready) && !variantMissing) {
     hint.className = "hint";
     if (state.engine === "instanthmr") {
       hint.textContent = t("job.readyInstant", {
-        model: status.selected_model,
+        model: instantVariant?.file || status.selected_model,
         python: status.python_version || "venv",
         device: status.device,
       });
@@ -430,7 +446,11 @@ function updateEngineHint() {
   if (!status.python_ok) missing.push(t("settings.checks.runtime"));
   if (state.engine === "instanthmr") {
     if (!status.deps_ok) missing.push(t("settings.checks.deps"));
-    if (!status.selected_model_ok) missing.push(`${t("settings.checks.model")} ${status.selected_model}`);
+    if (instantVariant && !instantVariant.exists) {
+      missing.push(`${t("settings.checks.model")} ${instantVariant.file}`);
+    } else if (!status.selected_model_ok) {
+      missing.push(`${t("settings.checks.model")} ${status.selected_model}`);
+    }
     if (!status.body_ok) missing.push("mhr-body.onnx");
   } else if (state.engine === "gemx") {
     if (!status.deps_ok) missing.push(t("settings.checks.deps"));
