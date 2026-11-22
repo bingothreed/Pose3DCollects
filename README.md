@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A local human motion reconstruction workbench that integrates **InstantHMR** and **FlowHMR** into a single interface:
+A local human motion reconstruction workbench that integrates **InstantHMR**, **FlowHMR** and **GEM-X** into a single interface:
 
 - **Reference Video**: Upload/preview videos with person boxes and 2D keypoints overlaid.
 - **3D Rendering**: Play reconstructed human mesh sequences with Three.js — rotate, zoom, scrub the timeline, toggle wireframe, download NPZ. You can also enable **Sync Video** to play the reference video (with an audio toggle) in a small window that follows the mesh, or **Fixed View** to lock the camera in the scene (off by default; the camera follows the person, similar to FlowHMR's "Follow" mode).
@@ -88,6 +88,26 @@ The **FlowHMR-Windows portable build** (`..\FlowHMR-Windows\FlowHMR`) is preferr
 
 The service starts automatically when you submit your first FlowHMR job; the first start loads models and may take several minutes. Service logs are at `data/logs/flowhmr-server.log`.
 
+### GEM-X
+
+GEM-X ([NVIDIA](https://github.com/nv-tlabs/GEM-X)) runs **Body Pose** framewise on videos: YOLOX detects and tracks the primary person, then the DINOv3 + SOMA model reconstructs the full body (18,056-vertex SOMA mesh, 77 joints) in camera space. It keeps the source video's frame rate (no 30 Hz normalization — that's the Body Motion pipeline, which is not wired into the workbench yet).
+
+| Item | Default |
+|---|---|
+| Project directory | `..\GEM-X` |
+| Python | `<project>\.venv\Scripts\python.exe` |
+| Weights directory | `<project>\weights` |
+| SOMA assets | `<project>\assets\soma` |
+
+- Click **Auto Setup Environment**: creates `.venv` and installs GEM-X (`pip install -e ".[video]"`). If `nvidia-smi` finds an NVIDIA GPU, it installs the CUDA PyTorch build (`torch 2.10.0+cu128` from the Aliyun mirror, ~2.9 GB) instead of the CPU wheel. Requires Python 3.12 on this machine (the pinned CUDA wheel is cp312).
+- Click **Auto Download Models** (~4.1 GB): YOLOX HumanArt detector (OpenMMLab), `body_s240000.ckpt` + `body_config.json` (Hugging Face `nvidia/GEM-X`), and the SOMA 0.3.3 assets (Hugging Face `nvidia/SOMA-X` revision `v0.3.3`, including the corrective weights). The **proxy** field is used for Hugging Face downloads (default `http://127.0.0.1:21882`); the YOLOX archive is fetched directly. Downloads are resumable and skipped when complete.
+- Inference needs ~7 GB of VRAM at the default batch size; CPU works but is slow. The first job compiles SOMA's Warp kernels (~10 s) and the cache is reused afterwards. The environment setup installs GPU ONNXRuntime on NVIDIA machines, and the detector defaults to **auto** (CUDA with CPU fallback — the worker puts torch's bundled CUDA DLLs on PATH, which is all ORT-GPU needs).
+- **Pose batch** and **fp16 boost** control pose throughput (measured on an RTX 3060: batch 16 + fp16 ≈ 55–60 ms/frame ≈ 17 fps, max vertex change vs fp32 < 0.3 mm). Detection on CUDA is ~70–90 ms/frame, so a 90-frame job finishes in ~30 s end-to-end (≈ 7 fps pipeline) — fast, but not live; GEM-X's DINOv3-H backbone is not a real-time model.
+- Speed paths that were tested and rejected: TensorRT (ORT's TRT EP cannot build the YOLOX graph — its TopK K=8400 exceeds TRT's 3840 limit), fp16 ONNX conversion of the detector (no gain on the 3060), and pipelining detection with pose (GPU memory-bandwidth contention made both ~3× slower).
+- SOMA on Windows is not part of GEM-X's upstream Linux-validated setup — this workbench integration was verified on an RTX 3060 with driver 621.24 (warp 1.19, usd-core 26.11).
+
+> Currently GEM-X reconstructs only the single most confident (auto-tracked) person per video. Body Motion (temporal, world-space), Hand Pose, and multi-person boxes are not wired into the workbench yet.
+
 ---
 
 ## Workflow
@@ -96,6 +116,7 @@ The service starts automatically when you submit your first FlowHMR job; the fir
 2. Drag a video into the right panel and set the max frames (`0` = all; long videos take longer) plus this task's precision:
    - InstantHMR: model tier (Nano → Medium, more accurate as you go) and fit mode (network only / 1 crop / 2 crops).
    - FlowHMR: generation quality (Fast 10 steps / Balanced 20 / Fine 40); more steps refine motion at a higher cost.
+   - GEM-X: framewise Body Pose with no extra per-task choices; the device and detector are configured in Settings.
      Optional model enhancements (Windows portable build, when the model is downloaded): HaMeR finger refinement (GPU required), torso motion optimization (`flowhmr_base`), and crossing-person optimization (SAM 2.1). They load extra models and take longer.
    If the selected model is not downloaded, the start button stays disabled and points you to Settings.
 3. Click **Start Reconstruction**.

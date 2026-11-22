@@ -69,6 +69,18 @@ export function initSettings() {
     if (button) openModelPath(button.dataset.openPath);
   });
 
+  $("#gemxSaveBtn").addEventListener("click", () => saveGemx(true));
+  $("#gemxEnvBtn").addEventListener("click", () => startSetup("gemx", "env"));
+  $("#gemxDownloadBtn").addEventListener("click", () => startSetup("gemx", "models"));
+  $("#gemxOpenModels").addEventListener("click", () => openEngineModels("gemx"));
+  $("#copyGemxModels").addEventListener("click", () => copyPath(
+    state.engines?.gemx?.models_dir || $("#gemxModelsDir").value.trim()));
+  $("#gemxOpenRoot").addEventListener("click", () => openFolder("gemx", "root"));
+  $("#gemxModels").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-path]");
+    if (button) openModelPath(button.dataset.openPath);
+  });
+
   $("#saveDefaultsBtn").addEventListener("click", saveDefaults);
   $("#stopSetupBtn").addEventListener("click", stopSetup);
   $("#closeSetupLog").addEventListener("click", () => show($("#setupLogCard"), false));
@@ -87,14 +99,16 @@ export function initSettings() {
 }
 
 export function syncSettingsEngine() {
-  const engine = state.engine === "flowhmr" ? "flowhmr" : "instanthmr";
+  const engine = ["instanthmr", "flowhmr", "gemx"].includes(state.engine)
+    ? state.engine : "instanthmr";
   show($("#instantCard"), engine === "instanthmr");
   show($("#flowCard"), engine === "flowhmr");
+  show($("#gemxCard"), engine === "gemx");
   show($("#poseFilterField"), engine === "instanthmr");
   show($("#instantSmoothField"), engine === "instanthmr");
   show($("#flowManualField"), engine === "flowhmr");
   show($("#flowStaticField"), engine === "flowhmr");
-  const label = engine === "instanthmr" ? "InstantHMR" : "FlowHMR";
+  const label = { instanthmr: "InstantHMR", flowhmr: "FlowHMR", gemx: "GEM-X" }[engine];
   const text = $("#settingsContextText");
   if (text) text.innerHTML = t("settings.context", { engine: label });
   const context = $("#settingsContext");
@@ -111,6 +125,8 @@ function setupTitle(title) {
   if (title.startsWith("准备 InstantHMR 环境")) return t("setup.title.prepareInstant");
   if (title.startsWith("自动配置 FlowHMR 环境")) return t("setup.title.autoFlow");
   if (title.startsWith("检查 FlowHMR 环境")) return t("setup.title.checkFlow");
+  if (title.startsWith("准备 GEM-X 环境")) return t("setup.title.prepareGemx");
+  if (title.startsWith("下载 GEM-X 模型")) return t("setup.title.downloadGemx");
   if (title.startsWith("下载 InstantHMR · ")) {
     return t("setup.title.downloadInstant", { model: title.split("·").pop().trim() });
   }
@@ -150,6 +166,17 @@ export function populateForms() {
   $("#flowBasePython").value = flow.base_python || "python";
   $("#flowDevice").value = flow.device || "auto";
 
+  const gemx = cfg.engines.gemx;
+  $("#gemxRoot").value = gemx.root || "";
+  $("#gemxPython").value = gemx.python || "";
+  $("#gemxModelsDir").value = gemx.models_dir || "";
+  $("#gemxSomaDir").value = gemx.soma_dir || "";
+  $("#gemxDevice").value = gemx.device || "auto";
+  $("#gemxDetectorDevice").value = gemx.detector_device || "auto";
+  $("#gemxPoseBatch").value = String(gemx.pose_batch ?? 16);
+  $("#gemxPoseFp16").value = String(Boolean(gemx.pose_fp16));
+  $("#gemxProxy").value = gemx.proxy || "";
+
   $("#defaultMaxFrames").value = cfg.job?.max_frames ?? 300;
   $("#poseFilter").value = inst.pose_filter || "one-euro";
   $("#instantSmooth").checked = Boolean(inst.smooth);
@@ -162,6 +189,7 @@ export function updateEngineStatus(engines) {
   if (!engines) return;
   renderInstant(engines.instanthmr);
   renderFlow(engines.flowhmr);
+  renderGemx(engines.gemx);
 }
 
 function renderInstant(status) {
@@ -312,6 +340,92 @@ function renderFlow(status) {
     hint.textContent = t("settings.flowHint.venv");
   } else {
     hint.textContent = t("settings.flowHint.manual");
+  }
+}
+
+function renderGemx(status) {
+  if (!status) return;
+  statusChip($("#gemxReadyChip"), status.ready, t("settings.ready"), t("settings.notReady"));
+  const missing = Object.entries(status.deps || {}).filter(([, ok]) => !ok).map(([name]) => name);
+  const checks = [
+    checkRow(t("settings.checks.project"), status.root_ok, shorten(status.root)),
+    checkRow(t("settings.checks.python"), status.python_ok,
+      status.python_version || shorten(status.python) || t("settings.detail.notCreated")),
+    checkRow(t("settings.checks.deps"), status.deps_ok,
+      missing.length ? t("settings.detail.missingDeps", { items: missing.join(", ") })
+        : "torch / transformers / onnxruntime / soma / gem"),
+    checkRow(t("settings.checks.cuda"), status.cuda_ok,
+      status.cuda_ok ? t("settings.detail.cudaYes") : t("settings.detail.cudaNo")),
+    checkRow(t("settings.checks.core"), status.ready,
+      status.ready ? t("settings.detail.allReady") : t("settings.detail.someMissing")),
+  ];
+  $("#gemxChecks").innerHTML = checks.join("");
+  const pathEl = $("#gemxModelsPath");
+  if (pathEl) {
+    pathEl.textContent = status.models_dir || "—";
+    pathEl.title = status.models_dir || "";
+  }
+
+  $("#gemxModels").innerHTML = (status.models || []).map((model) => `
+    <div class="model-row">
+      <div class="model-main">
+        <div class="model-title">${escapeHtml(model.label)}
+          ${model.required ? `<span class="chip">${escapeHtml(t("settings.required"))}</span>` : ""}</div>
+        <div class="model-file" title="${escapeHtml(model.path)}">${escapeHtml(shorten(model.path, 72))}</div>
+      </div>
+      <span class="model-state ${model.exists ? "ok" : "bad"}">${model.exists ? fmtBytes(model.size) : t("settings.model.missing")}</span>
+      <button type="button" class="link-btn" data-open-path="${escapeHtml(model.path)}"
+        title="${escapeHtml(t("settings.model.openDir"))}: ${escapeHtml(model.path)}">${t("settings.model.openDir")}</button>
+    </div>
+  `).join("");
+
+  const busy = Boolean(status.setup_running);
+  $("#gemxEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
+  $("#gemxEnvBtn").disabled = busy;
+  $("#gemxDownloadBtn").disabled = busy || !status.python_ok;
+  const hint = $("#gemxHint");
+  if (hint) {
+    if (!status.root_ok || !status.python_ok) {
+      hint.textContent = t("settings.gemx.hint.env");
+    } else if (status.device_warn) {
+      hint.textContent = t("settings.gemx.hint.cuda");
+    } else if (!status.ready) {
+      hint.textContent = t("settings.gemx.hint.models");
+    } else {
+      hint.textContent = t("settings.gemx.hint.ready");
+    }
+  }
+}
+
+async function saveGemx(notify) {
+  const payload = {
+    engines: {
+      gemx: {
+        root: $("#gemxRoot").value.trim(),
+        python: $("#gemxPython").value.trim(),
+        models_dir: $("#gemxModelsDir").value.trim(),
+        soma_dir: $("#gemxSomaDir").value.trim(),
+        device: $("#gemxDevice").value,
+        detector_device: $("#gemxDetectorDevice").value,
+        pose_batch: Number($("#gemxPoseBatch").value),
+        pose_fp16: $("#gemxPoseFp16").value === "true",
+        proxy: $("#gemxProxy").value.trim(),
+      },
+    },
+  };
+  try {
+    const result = await api.saveConfig(payload);
+    state.config = result.config;
+    state.engines = result.engines;
+    updateEngineStatus(result.engines);
+    populateForms();
+    emit("config", result.config);
+    emit("engines", result.engines);
+    if (notify) toast(t("settings.toast.savedGemx"), "success");
+    return true;
+  } catch (error) {
+    toast(error.message, "error");
+    return false;
   }
 }
 

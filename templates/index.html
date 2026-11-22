@@ -42,6 +42,11 @@
       <span class="engine-name">FlowHMR</span>
       <small data-i18n="engine.picker.flow">视频动捕 · 3D</small>
     </button>
+    <button type="button" class="engine-btn" data-engine="gemx">
+      <span class="engine-dot"></span>
+      <span class="engine-name">GEM-X</span>
+      <small data-i18n="engine.picker.gemx">全身姿态 · SOMA</small>
+    </button>
   </div>
 
   <div class="topbar-actions">
@@ -58,13 +63,16 @@
 <nav class="tabbar" role="tablist">
   <button type="button" class="tab-btn active" data-tab="video" role="tab">
     <span class="tab-num">01</span> <span data-i18n="tab.video">参考视频</span>
+    <span class="mode-badge offline" data-i18n="mode.offline" data-i18n-title="mode.offlineTitle">离线</span>
   </button>
   <button type="button" class="tab-btn" data-tab="viewer" role="tab">
     <span class="tab-num">02</span> <span data-i18n="tab.viewer">3D 渲染</span>
+    <span class="mode-badge playback" data-i18n="mode.playback" data-i18n-title="mode.playbackTitle">离线回放</span>
     <span class="tab-badge hidden" id="viewerBadge"></span>
   </button>
   <button type="button" class="tab-btn" data-tab="settings" role="tab">
     <span class="tab-num">03</span> <span data-i18n="tab.settings">设置与资源</span>
+    <span class="mode-badge hybrid" data-i18n="mode.hybrid" data-i18n-title="mode.hybridTitle">实时 + 离线</span>
   </button>
   <span class="tab-spacer"></span>
   <span class="current-job-chip hidden" id="currentJobChip"></span>
@@ -130,6 +138,7 @@
           <div class="card-head">
             <h2 data-i18n="job.new">新建任务</h2>
             <span class="chip" id="engineChip">InstantHMR</span>
+            <span class="mode-badge offline" data-i18n="mode.offline" data-i18n-title="mode.offlineTitle">离线</span>
           </div>
 
           <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择视频"
@@ -201,6 +210,10 @@
             </label>
           </div>
 
+          <div class="hidden" id="gemxPrecisionFields">
+            <p class="hint precision-hint" id="gemxPrecisionHint" data-i18n="job.precision.gemxHint">逐帧 Body Pose · 单人物（自动跟踪）· 相机坐标系；设备与检测器在「设置与资源」里配置。</p>
+          </div>
+
           <div class="enhance-grid" id="flowEnhanceFields">
             <label class="enhance-item">
               <input type="checkbox" id="flowHamer">
@@ -227,6 +240,7 @@
           <p class="hint precision-hint" id="flowEnhanceHint"></p>
 
           <button type="button" class="btn primary block" id="startJob" disabled data-i18n="job.start">开始重建</button>
+          <p class="hint" data-i18n="job.offlineNote">离线批处理：上传后逐帧重建，完成后可回放与下载。</p>
           <p class="hint" id="engineHint" data-i18n="job.detectingEngine">正在检测引擎状态…</p>
         </section>
 
@@ -327,7 +341,7 @@
         <div class="card-head">
           <div>
             <h2>InstantHMR</h2>
-            <p data-i18n="settings.instant.subtitle">ONNX 推理 · 独立虚拟环境</p>
+            <p><span data-i18n="settings.instant.subtitle">ONNX 推理 · 独立虚拟环境</span><span class="mode-badge hybrid" data-i18n="mode.hybrid" data-i18n-title="mode.instantTitle">实时 + 离线</span></p>
           </div>
           <div class="head-actions">
             <span class="chip" id="instantReadyChip" data-i18n="engine.detecting">检测中…</span>
@@ -376,17 +390,80 @@
           <button type="button" class="btn primary" id="instantSaveBtn" data-i18n="settings.saveInstant">保存设置</button>
           <button type="button" class="btn" id="instantEnvBtn" data-i18n="settings.env"
             data-i18n-title="settings.envTitle">自动配置环境</button>
+          <span class="mode-badge realtime" data-i18n="mode.realtime" data-i18n-title="mode.realtimeTitle">实时</span>
           <button type="button" class="btn" id="instantCameraBtn" data-i18n="settings.cameraOpen">打开实时摄像头</button>
         </div>
         <p class="hint" data-i18n="settings.instant.hint">首次使用：先「自动配置环境」，再在模型表里点下载；也可以按上面的位置手动放置模型。</p>
         <p class="hint" id="instantCameraHint" data-i18n="settings.cameraHint">逐帧实时推理（不录制、不二次重算），结果在 InstantHMR 自带的 Rerun 窗口中同步显示。检测器每 3 帧刷新，人体姿态每帧推理；关闭窗口或点「关闭实时摄像头」结束。</p>
       </section>
 
+      <section class="card settings-card" id="gemxCard">
+        <div class="card-head">
+          <div>
+            <h2>GEM-X</h2>
+            <p><span data-i18n="settings.gemx.subtitle">NVIDIA DINOv3 + SOMA · 独立虚拟环境</span><span class="mode-badge offline" data-i18n="mode.offline" data-i18n-title="mode.offlineTitle">离线</span></p>
+          </div>
+          <div class="head-actions">
+            <span class="chip" id="gemxReadyChip" data-i18n="engine.detecting">检测中…</span>
+          </div>
+        </div>
+        <div class="status-rows" id="gemxChecks"></div>
+        <div class="model-location">
+          <div class="model-location-main">
+            <span class="model-location-label" data-i18n="settings.location.gemx">权重放置位置</span>
+            <code class="model-location-path" id="gemxModelsPath">—</code>
+          </div>
+          <div class="model-location-actions">
+            <button type="button" class="btn ghost" id="copyGemxModels" data-i18n="settings.copyPath">复制路径</button>
+            <button type="button" class="btn ghost" id="gemxOpenModels" data-i18n="settings.openFolder">打开文件夹</button>
+          </div>
+        </div>
+        <p class="model-location-note" data-i18n="settings.gemx.locationNote">权重与 SOMA 资产的目标位置见下表；点行尾的「打开目录」可直接打开或创建对应文件夹，或使用下面的「自动下载模型」一键获取（约 4.1 GB，Hugging Face 下载走代理）。</p>
+        <div class="model-table" id="gemxModels"></div>
+        <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="gemxRoot" placeholder="GEM-X 根目录" data-i18n-placeholder="settings.gemxRootPlaceholder"></label>
+          <label class="field wide"><span data-i18n="settings.pythonRuntime">Python 运行时</span><input type="text" id="gemxPython" placeholder=".venv\Scripts\python.exe"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.modelsDir">权重目录</span><input type="text" id="gemxModelsDir" placeholder="GEM-X/weights"></label>
+          <label class="field"><span data-i18n="settings.somaDir">SOMA 资产目录</span><input type="text" id="gemxSomaDir" placeholder="GEM-X/assets/soma"></label>
+        </div>
+        <div class="inline-form">
+          <label class="field"><span data-i18n="settings.device">设备</span>
+            <select id="gemxDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cuda" data-i18n="settings.cuda">CUDA</option><option value="cpu" data-i18n="settings.cpu">CPU</option></select>
+          </label>
+          <label class="field"><span data-i18n="settings.detectorDevice">检测器设备</span>
+            <select id="gemxDetectorDevice"><option value="auto" data-i18n="settings.auto">自动</option><option value="cpu" data-i18n="settings.cpu">CPU</option><option value="cuda" data-i18n="settings.cuda">CUDA</option></select>
+          </label>
+          <label class="field"><span data-i18n="settings.poseBatch">姿态批量</span>
+            <select id="gemxPoseBatch">
+              <option value="1">1 · ~4 fps</option>
+              <option value="8">8 · ~10 fps</option>
+              <option value="16" selected>16 · ~16 fps</option>
+            </select>
+          </label>
+          <label class="field"><span data-i18n="settings.poseFp16">fp16 加速</span>
+            <select id="gemxPoseFp16"><option value="true" data-i18n="settings.on">开</option><option value="false" data-i18n="settings.off">关</option></select>
+          </label>
+        </div>
+        <div class="inline-form">
+          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="gemxProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="btn primary" id="gemxSaveBtn" data-i18n="settings.saveGemx">保存并检测</button>
+          <button type="button" class="btn" id="gemxEnvBtn" data-i18n="settings.env"
+            data-i18n-title="settings.envTitle">自动配置环境</button>
+          <button type="button" class="btn" id="gemxDownloadBtn" data-i18n="settings.downloadPublic">自动下载模型</button>
+          <button type="button" class="btn ghost" id="gemxOpenRoot" data-i18n="settings.openProject">打开项目目录</button>
+        </div>
+        <p class="hint" id="gemxHint" data-i18n="settings.gemx.hint">首次使用：先「自动配置环境」（有 NVIDIA 显卡会自动安装 CUDA 版 PyTorch，约 2.9 GB），再「自动下载模型」。推理需要约 6 GB 显存（CPU 也可以，但很慢）。</p>
+      </section>
+
       <section class="card settings-card" id="flowCard">
         <div class="card-head">
           <div>
             <h2>FlowHMR</h2>
-            <p data-i18n="settings.flow.subtitle">视频动捕 · 复用 FlowHMR 自带 Web 服务</p>
+            <p><span data-i18n="settings.flow.subtitle">视频动捕 · 复用 FlowHMR 自带 Web 服务</span><span class="mode-badge offline" data-i18n="mode.offline" data-i18n-title="mode.offlineTitle">离线</span></p>
           </div>
           <div class="head-actions">
             <span class="chip" id="flowReadyChip" data-i18n="engine.detecting">检测中…</span>

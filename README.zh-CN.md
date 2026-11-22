@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-一个在本机运行的人体动作重建工作台，把 **InstantHMR** 和 **FlowHMR** 集成到同一个界面里：
+一个在本机运行的人体动作重建工作台，把 **InstantHMR**、**FlowHMR** 和 **GEM-X** 集成到同一个界面里：
 
 - **参考视频**：上传/预览视频，显示人物框与 2D 关键点。
 - **3D 渲染**：用 Three.js 播放重建出的人体网格序列，可旋转、缩放、拖动时间轴、线框模式、下载 NPZ；还可开启「同步视频」让参考视频（含音频开关）以小窗跟随网格播放，或用「固定视角」把相机固定在场景中（默认关闭，相机会跟随人物移动，类似 FlowHMR 的「跟随」）。
@@ -88,6 +88,26 @@
 
 提交第一个 FlowHMR 任务时会自动启动服务；首次启动需要加载模型，可能要几分钟。服务日志在 `data/logs/flowhmr-server.log`。
 
+### GEM-X
+
+GEM-X（[NVIDIA](https://github.com/nv-tlabs/GEM-X)）按帧跑 **Body Pose**：YOLOX 检测并跟踪主要人物，DINOv3 + SOMA 模型在相机坐标系重建全身（18056 顶点 SOMA 网格、77 关节）。保留源视频帧率（不做 30Hz 归一化——那是 Body Motion 管线，暂未接入本工作台）。
+
+| 项目 | 默认值 |
+|---|---|
+| 项目目录 | `..\GEM-X` |
+| Python | `<项目>\.venv\Scripts\python.exe` |
+| 权重目录 | `<项目>\weights` |
+| SOMA 资产 | `<项目>\assets\soma` |
+
+- 点 **自动配置环境**：创建 `.venv` 并安装 GEM-X（`pip install -e ".[video]"`）。检测到 NVIDIA 显卡（`nvidia-smi`）时自动安装 CUDA 版 PyTorch（`torch 2.10.0+cu128`，走阿里云镜像，约 2.9 GB），否则用 CPU 版。本机需要 Python 3.12（固定使用的 CUDA 轮子是 cp312）。
+- 点 **自动下载模型**（约 4.1 GB）：YOLOX HumanArt 检测器（OpenMMLab）、`body_s240000.ckpt` 与 `body_config.json`（Hugging Face `nvidia/GEM-X`）、SOMA 0.3.3 资产（Hugging Face `nvidia/SOMA-X` 的 `v0.3.3` revision，含校正权重）。**下载代理**字段用于 Hugging Face（默认 `http://127.0.0.1:21882`），YOLOX 压缩包直连下载。下载支持断点续传，已完成的文件自动跳过。
+- 默认批量下推理约需 7 GB 显存；CPU 也能跑但很慢。首次任务会编译 SOMA 的 Warp 内核（约 10 秒），之后走缓存。环境安装会在 NVIDIA 机器上自动装 GPU 版 ONNXRuntime，检测器默认 **自动**（先 CUDA 失败回退 CPU——worker 会把 torch 自带的 CUDA DLL 加入 PATH，ORT-GPU 只缺这个）。
+- **姿态批量**与 **fp16 加速**控制姿态吞吐（RTX 3060 实测：批量 16 + fp16 ≈ 55–60 ms/帧 ≈ 17 fps，顶点与 fp32 最大差 <0.3 mm）。CUDA 检测约 70–90 ms/帧，90 帧任务端到端约 30 秒（≈ 7 fps 流水线）——快，但不是实时；GEM-X 的 DINOv3-H 主干本身就不是实时模型。
+- 试过并放弃的提速路径：TensorRT（ORT 的 TRT EP 无法构建 YOLOX 图——其 TopK K=8400 超过 TRT 上限 3840）、检测器 fp16 转换（3060 上无增益）、检测与姿态流水线并行（显存带宽竞争，两边都慢约 3 倍）。
+- SOMA 跑 Windows 不在 GEM-X 上游验证范围内——本次接入在 RTX 3060（驱动 621.24，warp 1.19 / usd-core 26.11）上实测通过。
+
+> GEM-X 目前每条视频只重建自动跟踪到的最高置信度一人。Body Motion（时序、世界坐标）、Hand Pose、多人框暂未接入工作台。
+
 ---
 
 ## 使用流程
@@ -96,6 +116,7 @@
 2. 右侧拖入视频，设置最大帧数（`0` = 全部；长视频耗时更久）和本次任务的精度：
    - InstantHMR：模型档位（Nano → Medium，越往后越准）+ 拟合方式（网络直出 / 1 crop / 2 crop）。
    - FlowHMR：生成精度（快速 10 步 / 标准 20 步 / 精细 40 步），步数越多动作越精细、耗时越长。
+   - GEM-X：逐帧 Body Pose，无额外任务选项；设备与检测器在「设置与资源」里配置。
      还可按需开启模型增强（Windows 便携版，模型已下载时可选）：HaMeR 手指精修（需要 GPU）、躯干动作优化（`flowhmr_base`）、人物交叉优化（SAM 2.1）。这些会额外加载模型并增加耗时。
    所选模型未下载时，开始按钮会禁用并提示到「设置与资源」下载。
 3. 点 **开始重建**。

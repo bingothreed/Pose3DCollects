@@ -84,7 +84,7 @@ def _merge_config(payload: dict) -> None:
     engines_payload = payload.get("engines")
     if not isinstance(engines_payload, dict):
         engines_payload = {}
-    for engine in ("instanthmr", "flowhmr"):
+    for engine in ("instanthmr", "flowhmr", "gemx"):
         if engine not in engines_payload or not isinstance(engines_payload[engine], dict):
             continue
         src = engines_payload[engine]
@@ -108,8 +108,16 @@ def _merge_config(payload: dict) -> None:
         for key in ("steps", "sam_chunk_size", "startup_timeout"):
             if key in src and src[key] not in (None, ""):
                 dest[key] = int(src[key])
+        if engine == "gemx":
+            for key in ("soma_dir", "checkpoint", "detector", "detector_device", "proxy"):
+                if key in src and src[key] is not None:
+                    dest[key] = str(src[key]).strip()
+            if "pose_batch" in src and src["pose_batch"] not in (None, ""):
+                dest["pose_batch"] = max(1, min(32, int(src["pose_batch"])))
+            if "pose_fp16" in src:
+                dest["pose_fp16"] = bool(src["pose_fp16"])
 
-    for engine in ("instanthmr", "flowhmr"):
+    for engine in ("instanthmr", "flowhmr", "gemx"):
         eng = CONFIG["engines"][engine]
         root = Path(eng["root"])
         detected_python = cfgmod.flow_python(root) if engine == "flowhmr" else cfgmod.venv_python(root)
@@ -120,12 +128,17 @@ def _merge_config(payload: dict) -> None:
             models = Path(eng.get("models_dir") or "")
             if not eng.get("models_dir") or not models.is_dir():
                 eng["models_dir"] = str(root / "models")
+        elif engine == "gemx":
+            if not eng.get("models_dir"):
+                eng["models_dir"] = str(root / "weights")
+            if not eng.get("soma_dir"):
+                eng["soma_dir"] = str(root / "assets" / "soma")
 
 
 def _engine_payload() -> dict:
     status = engines.all_status(CONFIG, FLOW.status())
     status["instanthmr"]["camera"] = CAMERA.status()
-    for engine_id in ("instanthmr", "flowhmr"):
+    for engine_id in ("instanthmr", "flowhmr", "gemx"):
         active = SETUP.active_for(engine_id)
         status[engine_id]["setup_running"] = active.id if active else None
     return status
@@ -192,6 +205,24 @@ def _check_engine(engine: str, params: dict | None = None) -> None:
             if unavailable:
                 raise RuntimeError("FlowHMR 增强项不可用：" + "、".join(unavailable)
                                    + "。请到「设置与资源」准备。")
+    elif engine == "gemx":
+        status = engines.gemx_status(CONFIG)
+        missing = []
+        if not status["root_ok"]:
+            missing.append("GEM-X 目录")
+        if not status["python_ok"]:
+            missing.append("虚拟环境")
+        if not status["deps_ok"]:
+            missing.append("Python 依赖")
+        for item in status["models"]:
+            if item["required"] and not item["exists"]:
+                missing.append(item["label"])
+        if status["device_warn"]:
+            raise RuntimeError("当前设置为 CUDA 但 torch 没有可用的 CUDA；"
+                               "请到设置里把设备改为 auto 或 cpu")
+        if missing:
+            raise RuntimeError("GEM-X 未就绪：缺少 " + "、".join(missing)
+                               + "。请到「设置与资源」准备。")
     else:
         raise RuntimeError(f"未知引擎: {engine}")
 
@@ -225,7 +256,7 @@ def _job_params(engine: str) -> dict:
                             if smooth_raw not in (None, "")
                             else bool(inst.get("smooth", False)))
         params["focal"] = inst.get("focal")
-    else:
+    elif engine == "flowhmr":
         eng = CONFIG["engines"]["flowhmr"]
         steps_raw = request.args.get("steps")
         if steps_raw not in (None, ""):
@@ -261,6 +292,10 @@ def _job_params(engine: str) -> dict:
             params["max_frames"] = 900
         else:
             params["max_frames"] = max(30, min(10000, params["max_frames"]))
+    elif engine == "gemx":
+        params["device"] = CONFIG["engines"]["gemx"].get("device")
+    else:
+        raise ValueError(f"未知引擎: {engine}")
     return params
 
 
@@ -382,7 +417,7 @@ def api_jobs():
 @app.route("/api/jobs", methods=["POST", "PUT"])
 def api_create_job():
     engine = request.args.get("engine", "instanthmr")
-    if engine not in ("instanthmr", "flowhmr"):
+    if engine not in ("instanthmr", "flowhmr", "gemx"):
         return jsonify(error=f"未知引擎: {engine}"), 400
     filename = Path(request.args.get("filename") or "video.mp4").name
     if Path(filename).suffix.lower() not in VIDEO_EXTS:
@@ -557,7 +592,7 @@ def api_job_npz(job_id: str):
     path = JOBS._dir(job_id) / "motion.npz"
     if not path.is_file():
         abort(404)
-    name = f"{Path(job['filename']).stem}_instanthmr.npz"
+    name = f"{Path(job['filename']).stem}_{job.get('engine') or 'instanthmr'}.npz"
     return send_file(path, mimetype="application/octet-stream", as_attachment=True,
                      download_name=name, conditional=True)
 

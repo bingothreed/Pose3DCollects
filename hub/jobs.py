@@ -80,7 +80,7 @@ class JobManager:
 
     # ------------------------------------------------------------------ create
     def submit(self, engine: str, filename: str, temp_path: Path, params: dict) -> dict:
-        if engine not in ("instanthmr", "flowhmr"):
+        if engine not in ("instanthmr", "flowhmr", "gemx"):
             raise RuntimeError(f"未知引擎: {engine}")
         suffix = Path(filename).suffix.lower()
         if suffix not in VIDEO_EXTS:
@@ -103,7 +103,8 @@ class JobManager:
         with self.lock:
             self.jobs[job_id] = job
             self._save(job)
-        target = self._run_instant if engine == "instanthmr" else self._run_flow
+        target = self._run_instant if engine == "instanthmr" else (
+            self._run_gemx if engine == "gemx" else self._run_flow)
         threading.Thread(target=target, args=(job_id,), daemon=True,
                          name=f"job-{job_id}").start()
         return self.get(job_id)
@@ -295,6 +296,132 @@ class JobManager:
             meta_path = out_dir / "mesh" / "meta.json"
             if not meta_path.is_file():
                 raise RuntimeError("InstantHMR 没有生成 3D 结果")
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self._update(job_id, status="done", progress=100, stage="完成", message="重建完成",
+                         finished=now(), meta=meta,
+                         num_frames=meta.get("num_frames"), fps=meta.get("fps"))
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job and job.get("status") != "cancelled":
+                    job.update(status="error", error=str(exc), message=str(exc), finished=now())
+                    self._save(job)
+        finally:
+            with self.lock:
+                self.procs.pop(job_id, None)
+
+    # ------------------------------------------------------------------ gemx
+    def _run_gemx(self, job_id: str) -> None:
+        try:
+            with self.lock:
+                job = self.jobs[job_id]
+                params = dict(job["params"])
+                input_path = self._dir(job_id) / job["input_file"]
+            status = engines.gemx_status(self.cfg)
+            missing = []
+            if not status["root_ok"]:
+                missing.append("项目目录")
+            if not status["python_ok"]:
+                missing.append("Python 环境")
+            if not status["deps_ok"]:
+                missing.append("依赖")
+            layout = engines.gemx_layout(Path(self.cfg["engines"]["gemx"]["root"]),
+                                         self.cfg["engines"]["gemx"])
+            for label, path in (("Body Pose 模型", layout["checkpoint"]),
+                                ("YOLOX 检测器", layout["detector"])):
+                if not path.is_file():
+                    missing.append(label)
+            if not all(p.is_file() for p in layout["soma_files"]):
+                missing.append("SOMA 资产")
+            if status["device_warn"]:
+                raise RuntimeError("当前设置为 CUDA 但 torch 没有可用的 CUDA；"
+                                   "请到设置里把设备改为 auto 或 cpu")
+            if missing:
+                raise RuntimeError("GEM-X 尚未就绪，缺少: " + "、".join(missing)
+                                   + "（到“设置与资源”里一键准备）")
+            out_dir = self._dir(job_id)
+            video_name = "video.mp4"
+            video_path = out_dir / video_name
+            self._update(job_id, message="准备参考视频…", stage="准备")
+            media = self._transcode(job_id, input_path, video_path)
+            if media != video_path:
+                video_name = media.name
+            self._update(job_id, video_file=video_name, status="running", stage="检测与重建",
+                         message="加载模型并处理视频…", progress=2)
+
+            python = status["python"]
+            worker = cfgmod.BASE_DIR / "workers" / "gemx_worker.py"
+            max_frames = int(params.get("max_frames") or 0)
+            cmd = [
+                python, str(worker), "--project", status["root"], "--video", str(media),
+                "--out", str(out_dir), "--checkpoint", str(layout["checkpoint"]),
+                "--detector", str(layout["detector"]), "--soma", str(layout["soma_dir"]),
+                "--device", str(params.get("device") or status.get("device") or "auto"),
+                "--detector-device", str(status.get("detector_device") or "auto"),
+                "--pose-batch", str(int(status.get("pose_batch") or 8)),
+                "--fp16", "1" if bool(status.get("pose_fp16", True)) else "0",
+                "--max-frames", str(max_frames),
+            ]
+            self._log(job_id, "$ " + " ".join(cmd))
+            env = dict(os.environ)
+            env.update({"PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"})
+            flags = 0
+            if os.name == "nt":
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
+            proc = subprocess.Popen(
+                cmd, cwd=status["root"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1, creationflags=flags,
+                stdin=subprocess.DEVNULL,
+            )
+            with self.lock:
+                self.procs[job_id] = proc
+            done_payload = None
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                if line.startswith("{"):
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        self._log(job_id, line)
+                        continue
+                    kind = event.get("type")
+                    if kind == "progress":
+                        frame = int(event.get("frame") or 0)
+                        total = int(event.get("total") or 0)
+                        with self.lock:
+                            current = int(self.jobs[job_id].get("progress") or 0)
+                        if total > 0:
+                            pct = 2 + int(96 * min(frame / total, 1.0))
+                        else:
+                            pct = max(current, min(95, 2 + frame // 10))
+                        self._update(job_id, save=False, progress=pct,
+                                     message=event.get("message") or (
+                                         f"处理帧 {frame}/{total}" if total else f"已处理 {frame} 帧"),
+                                     stage=event.get("stage") or "检测与重建")
+                    elif kind == "log":
+                        self._log(job_id, event.get("message", ""))
+                    elif kind == "done":
+                        done_payload = event.get("meta") or {}
+                    elif kind == "error":
+                        raise RuntimeError(event.get("message") or "GEM-X 处理失败")
+                else:
+                    self._log(job_id, line)
+            code = proc.wait()
+            with self.lock:
+                self.procs.pop(job_id, None)
+            with self.lock:
+                cancelled = self.jobs[job_id]["status"] == "cancelled"
+            if cancelled:
+                return
+            if code != 0 or done_payload is None:
+                tail = "\n".join(self.jobs[job_id].get("logs", [])[-8:])
+                raise RuntimeError(f"GEM-X 进程退出（{code}）\n{tail}")
+            meta_path = out_dir / "mesh" / "meta.json"
+            if not meta_path.is_file():
+                raise RuntimeError("GEM-X 没有生成 3D 结果")
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             self._update(job_id, status="done", progress=100, stage="完成", message="重建完成",
                          finished=now(), meta=meta,
