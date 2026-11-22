@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import uuid
@@ -22,6 +23,22 @@ INSTANT_TIER_LABEL = {
 }
 INSTANT_MODULES = ["onnxruntime", "cv2", "numpy", "rfdetr"]
 INSTANT_DOWNLOAD_MODULES = ["huggingface_hub"]
+
+GEMX_MODULES = ["torch", "cv2", "numpy", "onnxruntime", "transformers", "soma", "gem"]
+
+TDPT_MODULES = ["onnxruntime", "cv2", "numpy"]
+TDPT_MODEL_SINGLE = "MobileNet3D3_6.onnx"
+TDPT_MODEL_THREE = "ThreeDPoseTracker_3frames.onnx"
+TDPT_MODEL_URL = ("https://raw.githubusercontent.com/digital-standard/ThreeDPoseTracker/"
+                  "master/Assets/Model/MobileNet3D3_6.onnx")
+GEMX_SOMA_FILES = [
+    "SOMA_neutral.npz",
+    "SOMA_template_rig.usda",
+    "SOMA_procedural_transforms.json",
+    "correctives_model.pt",
+]
+GEMX_TORCH_CUDA_WHEEL = ("https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+                         "torch-2.10.0%2Bcu128-cp312-cp312-win_amd64.whl")
 
 
 def instant_model_filename(tier: str, fit: int) -> str:
@@ -52,6 +69,7 @@ _ENGINE_CACHE: dict[str, tuple[float, dict]] = {}
 def clear_caches() -> None:
     _MODULE_CACHE.clear()
     _ENGINE_CACHE.clear()
+    _CUDA_CACHE.clear()
 
 
 def check_modules(python: str, modules: list[str], ttl: float = 90.0) -> dict:
@@ -156,6 +174,7 @@ def instant_status(cfg: dict) -> dict:
         "fit": int(engine.get("fit") or 0),
         "device": engine.get("device", "auto"),
         "pose_filter": engine.get("pose_filter", "one-euro"),
+        "smooth": bool(engine.get("smooth", False)),
         "root_ok": root_ok,
         "python_ok": python_ok,
         "deps": deps,
@@ -366,8 +385,170 @@ def flow_status(cfg: dict, server_status: dict | None = None) -> dict:
     }
 
 
+def gemx_layout(root: Path, eng: dict) -> dict:
+    models_dir = Path(eng.get("models_dir") or root / "weights")
+    soma_dir = Path(eng.get("soma_dir") or root / "assets" / "soma")
+    return {
+        "models_dir": models_dir,
+        "checkpoint": models_dir / (eng.get("checkpoint") or "body_s240000.ckpt"),
+        "detector": models_dir / (eng.get("detector") or "yolox_humanart.onnx"),
+        "soma_dir": soma_dir,
+        "soma_files": [soma_dir / name for name in GEMX_SOMA_FILES],
+    }
+
+
+_CUDA_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+def _gemx_cuda_available(python: str) -> bool:
+    """torch.cuda.is_available(), cached briefly (spawning torch is slow)."""
+    if not python or not Path(python).is_file():
+        return False
+    hit = _CUDA_CACHE.get(python)
+    if hit and now() - hit[0] < 300:
+        return hit[1]
+    code = "import torch; print('1' if torch.cuda.is_available() else '0')"
+    result = False
+    try:
+        proc = subprocess.run([python, "-c", code], capture_output=True, text=True,
+                              timeout=60, encoding="utf-8", errors="replace")
+        result = proc.returncode == 0 and proc.stdout.strip().splitlines()[-1] == "1"
+    except Exception:
+        pass
+    _CUDA_CACHE[python] = (now(), result)
+    return result
+
+
+def gemx_status(cfg: dict) -> dict:
+    engine = cfg["engines"]["gemx"]
+    root = Path(engine["root"])
+    layout = gemx_layout(root, engine)
+    python = engine.get("python") or ""
+    if not python or not Path(python).is_file():
+        python = cfgmod.venv_python(root)
+    root_ok = root.is_dir()
+    python_ok = bool(python) and Path(python).is_file()
+    deps = check_modules(python, GEMX_MODULES) if python_ok else {m: False for m in GEMX_MODULES}
+    deps_ok = python_ok and all(deps.values())
+    cuda = _gemx_cuda_available(python) if deps_ok else False
+    models = [
+        _model_row("Body Pose 主模型", layout["checkpoint"], True,
+                   "body_s240000.ckpt（约 3.5 GB）"),
+        _model_row("YOLOX 人物检测器", layout["detector"], True,
+                   "yolox_humanart.onnx"),
+    ]
+    soma_rows = [_model_row(name, path, True, "SOMA 0.3.3 资产")
+                 for name, path in zip(GEMX_SOMA_FILES, layout["soma_files"])]
+    soma_ok = _files_exist(*layout["soma_files"])
+    device = str(engine.get("device") or "auto")
+    device_warn = device == "cuda" and not cuda
+    ready = (root_ok and python_ok and deps_ok and all(m["exists"] for m in models) and soma_ok
+             and not device_warn)
+    return {
+        "id": "gemx",
+        "name": "GEM-X",
+        "subtitle": "NVIDIA · 单目全身姿态",
+        "root": str(root),
+        "python": python,
+        "python_version": python_version(python) if python_ok else "",
+        "models_dir": str(layout["models_dir"]),
+        "soma_dir": str(layout["soma_dir"]),
+        "device": device,
+        "detector_device": str(engine.get("detector_device") or "auto"),
+        "pose_batch": int(engine.get("pose_batch") or 8),
+        "pose_fp16": bool(engine.get("pose_fp16", True)),
+        "checkpoint": str(engine.get("checkpoint") or "body_s240000.ckpt"),
+        "detector": str(engine.get("detector") or "yolox_humanart.onnx"),
+        "proxy": str(engine.get("proxy") or ""),
+        "root_ok": root_ok,
+        "python_ok": python_ok,
+        "deps": deps,
+        "deps_ok": deps_ok,
+        "cuda_ok": cuda,
+        "device_warn": device_warn,
+        "models": models + soma_rows,
+        "ready": ready,
+        "env_kind": "venv" if python_ok else ("project" if root_ok else "missing"),
+        "can_create_env": root_ok,
+        "setup_running": None,
+    }
+
+
+def tdpt_python(cfg: dict) -> str:
+    engine = cfg["engines"]["tdpt"]
+    python = engine.get("python") or ""
+    if python and Path(python).is_file():
+        return python
+    detected = cfgmod.venv_python(Path(engine["root"]))
+    return detected or python
+
+
+def tdpt_model_path(cfg: dict) -> Path:
+    engine = cfg["engines"]["tdpt"]
+    models_dir = Path(engine.get("models_dir") or Path(engine["root"]) / "models")
+    return models_dir / (engine.get("model") or TDPT_MODEL_SINGLE)
+
+
+def tdpt_status(cfg: dict) -> dict:
+    engine = cfg["engines"]["tdpt"]
+    root = Path(engine["root"])
+    python = tdpt_python(cfg)
+    models_dir = Path(engine.get("models_dir") or root / "models")
+    model_path = tdpt_model_path(cfg)
+    root_ok = root.is_dir()
+    python_ok = bool(python) and Path(python).is_file()
+    deps = check_modules(python, TDPT_MODULES) if python_ok else {m: False for m in TDPT_MODULES}
+    deps_ok = python_ok and all(deps.values())
+    model_info = file_info(model_path)
+    ready = root_ok and python_ok and deps_ok and model_info["exists"]
+    known = [
+        (TDPT_MODEL_THREE, "TDPT 3 帧模型（ThreeDPoseLibrary）",
+         "448px · 三帧窗口 · 本地转换，非自动下载"),
+        (TDPT_MODEL_SINGLE, "TDPT 单帧模型（公共）",
+         "224px · MobileNet3D3_6 · 约 33 MB"),
+    ]
+    models = []
+    for name, label, note in known:
+        path = models_dir / name
+        models.append(_model_row(label, path, path == model_path, note))
+    if model_path not in (models_dir / name for name, _, _ in known):
+        models.append(_model_row("TDPT 自定义模型", model_path, True))
+    return {
+        "id": "tdpt",
+        "name": "TDPT",
+        "subtitle": "VNect · 3 帧窗口 / 单帧 3D 骨架",
+        "root": str(root),
+        "python": python,
+        "python_version": python_version(python) if python_ok else "",
+        "models_dir": str(models_dir),
+        "model": engine.get("model") or TDPT_MODEL_SINGLE,
+        "model_path": str(model_path),
+        "device": engine.get("device", "cpu"),
+        "smooth": bool(engine.get("smooth", True)),
+        "root_smooth": bool(engine.get("root_smooth", False)),
+        "flip_video": bool(engine.get("flip_video", True)),
+        "scale": float(engine.get("scale") or 0.01),
+        "camera_index": int(engine.get("camera_index") or 0),
+        "proxy": str(engine.get("proxy") or ""),
+        "root_ok": root_ok,
+        "python_ok": python_ok,
+        "deps": deps,
+        "deps_ok": deps_ok,
+        "models": models,
+        "model_ok": model_info["exists"],
+        "ready": ready,
+        "env_kind": "venv" if python_ok else ("project" if root_ok else "missing"),
+        # The env setup task copies the source templates from this repo and
+        # creates the directory, so it works even on a fresh machine.
+        "can_create_env": True,
+        "can_download_models": python_ok,
+        "setup_running": None,
+    }
+
+
 def all_status(cfg: dict, server_status: dict | None = None) -> dict:
-    return {"instanthmr": instant_status(cfg), "flowhmr": flow_status(cfg, server_status)}
+    return {"instanthmr": instant_status(cfg), "flowhmr": flow_status(cfg, server_status),
+            "gemx": gemx_status(cfg), "tdpt": tdpt_status(cfg)}
 
 
 # --------------------------------------------------------------------------- setup tasks
@@ -616,6 +797,92 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
 
         return manager.start("自动配置 FlowHMR 环境", engine, runner, success)
 
+    if engine == "gemx":
+        root = Path(cfg["engines"]["gemx"]["root"])
+        if not root.is_dir():
+            raise RuntimeError(f"GEM-X 目录不存在: {root}")
+
+        def has_nvidia_gpu() -> bool:
+            try:
+                proc = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                                      capture_output=True, text=True, timeout=15)
+                return proc.returncode == 0 and bool(proc.stdout.strip())
+            except Exception:
+                return False
+
+        def runner(task: SetupTask):
+            venv_python = _ensure_venv(task, root, cfg["engines"]["gemx"].get("base_python", "python"))
+            task.log("升级 pip…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], cwd=root)
+            if has_nvidia_gpu():
+                task.log("检测到 NVIDIA GPU：安装 CUDA 版 PyTorch（约 2.9 GB）…")
+                _run_step(task, [str(venv_python), "-m", "pip", "install",
+                                 GEMX_TORCH_CUDA_WHEEL], cwd=root)
+            else:
+                task.log("未检测到 NVIDIA GPU：使用 CPU 版 PyTorch。")
+            task.log("安装 GEM-X（含 transformers / onnxruntime 等依赖）…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "-e", ".[video]"], cwd=root)
+            if has_nvidia_gpu():
+                task.log("检测到 NVIDIA GPU：把检测器运行时换成 GPU 版 ONNXRuntime…")
+                _run_step(task, [str(venv_python), "-m", "pip", "uninstall", "-y", "onnxruntime"], cwd=root)
+                _run_step(task, [str(venv_python), "-m", "pip", "install",
+                                 "onnxruntime-gpu>=1.20,<2"], cwd=root)
+            task.log("校验运行依赖…")
+            clear_caches()
+            deps = check_modules(str(venv_python), GEMX_MODULES, ttl=0)
+            missing = [name for name, ok in deps.items() if not ok]
+            if missing:
+                raise RuntimeError("依赖校验未通过，缺少: " + ", ".join(missing))
+            cuda = _gemx_cuda_available(str(venv_python))
+            task.log("依赖校验通过: " + " / ".join(GEMX_MODULES))
+            task.log("CUDA 可用。" if cuda else "CUDA 不可用（将使用 CPU）。")
+            task.log("环境准备完成。接下来请用「自动下载模型」准备权重。")
+
+        def success(task: SetupTask):
+            venv_python = _venv_python(root)
+            if venv_python.is_file():
+                update_config(lambda c: c["engines"]["gemx"].__setitem__("python", str(venv_python)))
+            clear_caches()
+
+        return manager.start("准备 GEM-X 环境", engine, runner, success)
+
+    if engine == "tdpt":
+        root = Path(cfg["engines"]["tdpt"]["root"])
+        templates = cfgmod.BASE_DIR / "engines" / "tdpt"
+        mirror = "https://mirrors.aliyun.com/pypi/simple/"
+
+        def runner(task: SetupTask):
+            root.mkdir(parents=True, exist_ok=True)
+            task.log(f"写入引擎源码模板（{templates}）…")
+            for name in ("tdpt_vnect.py", "demo.py", "requirements.txt"):
+                src = templates / name
+                if not src.is_file():
+                    raise RuntimeError(f"缺少 TDPT 源码模板: {src}")
+                shutil.copyfile(src, root / name)
+            venv_python = _ensure_venv(task, root, cfg["engines"]["tdpt"].get("base_python", "python"))
+            task.log("升级 pip…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
+                             "-i", mirror], cwd=root)
+            task.log("安装 requirements.txt（onnxruntime / opencv / numpy，走阿里云镜像）…")
+            _run_step(task, [str(venv_python), "-m", "pip", "install",
+                             "-i", mirror, "-r", "requirements.txt"], cwd=root)
+            task.log("校验运行依赖…")
+            clear_caches()
+            deps = check_modules(str(venv_python), TDPT_MODULES, ttl=0)
+            missing = [name for name, ok in deps.items() if not ok]
+            if missing:
+                raise RuntimeError("依赖校验未通过，缺少: " + ", ".join(missing))
+            task.log("依赖校验通过: " + " / ".join(TDPT_MODULES))
+            task.log("环境准备完成。接下来请用「自动下载模型」获取权重。")
+
+        def success(task: SetupTask):
+            venv_python = _venv_python(root)
+            if venv_python.is_file():
+                update_config(lambda c: c["engines"]["tdpt"].__setitem__("python", str(venv_python)))
+            clear_caches()
+
+        return manager.start("准备 TDPT 环境", engine, runner, success)
+
     raise RuntimeError(f"unknown engine: {engine}")
 
 
@@ -664,5 +931,50 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
             task.log("模型下载完成。")
 
         return manager.start("下载 FlowHMR 公开模型", engine, runner)
+
+    if engine == "gemx":
+        eng = cfg["engines"]["gemx"]
+        root = Path(eng["root"])
+        python = eng.get("python") or ""
+        if not python or not Path(python).is_file():
+            python = cfgmod.venv_python(root)
+        if not python or not Path(python).is_file():
+            raise RuntimeError("GEM-X 虚拟环境不存在，请先创建环境")
+        layout = gemx_layout(root, eng)
+        worker = cfgmod.BASE_DIR / "workers" / "download_gemx_models.py"
+        proxy = str(eng.get("proxy") or "").strip()
+
+        def runner(task: SetupTask):
+            env = _setup_env({
+                "HF_HOME": str(root / ".cache" / "huggingface"),
+            })
+            if proxy:
+                env.update({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy})
+            _run_step(task, [python, str(worker),
+                             "--models-dir", str(layout["models_dir"]),
+                             "--soma-dir", str(layout["soma_dir"]),
+                             "--proxy", proxy],
+                      cwd=root, env=env)
+            task.log("模型下载完成。")
+
+        return manager.start("下载 GEM-X 模型（约 4.1 GB）", engine, runner)
+
+    if engine == "tdpt":
+        eng = cfg["engines"]["tdpt"]
+        root = Path(eng["root"])
+        python = tdpt_python(cfg)
+        if not python or not Path(python).is_file():
+            raise RuntimeError("TDPT 虚拟环境不存在，请先创建环境")
+        models_dir = Path(eng.get("models_dir") or root / "models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        worker = cfgmod.BASE_DIR / "workers" / "download_tdpt_models.py"
+        proxy = str(eng.get("proxy") or "").strip()
+
+        def runner(task: SetupTask):
+            _run_step(task, [python, str(worker), "--models-dir", str(models_dir),
+                             "--proxy", proxy], cwd=root)
+            task.log("模型下载完成。")
+
+        return manager.start("下载 TDPT 模型（约 33 MB）", engine, runner)
 
     raise RuntimeError(f"unknown engine: {engine}")

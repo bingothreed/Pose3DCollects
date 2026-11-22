@@ -21,6 +21,8 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 from hub import config as cfgmod
 from hub import engines
 from hub.flow_server import FlowServer
+from hub.instant_camera import InstantCamera
+from hub.tdpt_camera import TDPTCamera
 from hub.jobs import JobManager, VIDEO_EXTS, video_mime
 
 BASE_DIR = cfgmod.BASE_DIR
@@ -31,6 +33,8 @@ cfgmod.ensure_dirs()
 SETUP = engines.SetupManager()
 FLOW = FlowServer(cfgmod.LOGS_DIR)
 FLOW.configure(CONFIG)
+CAMERA = InstantCamera(cfgmod.LOGS_DIR)
+TDPT_CAMERA = TDPTCamera(cfgmod.LOGS_DIR)
 JOBS = JobManager(CONFIG, FLOW)
 
 MAX_UPLOAD = 24 * 1024 * 1024 * 1024  # 24 GiB
@@ -82,7 +86,7 @@ def _merge_config(payload: dict) -> None:
     engines_payload = payload.get("engines")
     if not isinstance(engines_payload, dict):
         engines_payload = {}
-    for engine in ("instanthmr", "flowhmr"):
+    for engine in ("instanthmr", "flowhmr", "gemx", "tdpt"):
         if engine not in engines_payload or not isinstance(engines_payload[engine], dict):
             continue
         src = engines_payload[engine]
@@ -94,18 +98,39 @@ def _merge_config(payload: dict) -> None:
             dest["model"] = str(src["model"])
         if "fit" in src and src["fit"] not in (None, ""):
             dest["fit"] = int(src["fit"])
+        if "camera_index" in src and src["camera_index"] not in (None, ""):
+            dest["camera_index"] = int(src["camera_index"])
         if "focal" in src:
             dest["focal"] = float(src["focal"]) if src["focal"] not in (None, "") else None
         if "port" in src and src["port"] not in (None, ""):
             dest["port"] = int(src["port"])
-        for key in ("static_camera", "manual_select"):
+        for key in ("static_camera", "manual_select", "smooth"):
             if key in src:
                 dest[key] = bool(src[key])
         for key in ("steps", "sam_chunk_size", "startup_timeout"):
             if key in src and src[key] not in (None, ""):
                 dest[key] = int(src[key])
+        if engine == "gemx":
+            for key in ("soma_dir", "checkpoint", "detector", "detector_device", "proxy"):
+                if key in src and src[key] is not None:
+                    dest[key] = str(src[key]).strip()
+        if engine == "tdpt":
+            for key in ("proxy",):
+                if key in src and src[key] is not None:
+                    dest[key] = str(src[key]).strip()
+            if "flip_video" in src:
+                dest["flip_video"] = bool(src["flip_video"])
+            if "scale" in src and src["scale"] not in (None, ""):
+                value = float(src["scale"])
+                if value <= 0:
+                    raise ValueError("TDPT 缩放值必须大于 0")
+                dest["scale"] = value
+            if "pose_batch" in src and src["pose_batch"] not in (None, ""):
+                dest["pose_batch"] = max(1, min(32, int(src["pose_batch"])))
+            if "pose_fp16" in src:
+                dest["pose_fp16"] = bool(src["pose_fp16"])
 
-    for engine in ("instanthmr", "flowhmr"):
+    for engine in ("instanthmr", "flowhmr", "gemx", "tdpt"):
         eng = CONFIG["engines"][engine]
         root = Path(eng["root"])
         detected_python = cfgmod.flow_python(root) if engine == "flowhmr" else cfgmod.venv_python(root)
@@ -116,11 +141,21 @@ def _merge_config(payload: dict) -> None:
             models = Path(eng.get("models_dir") or "")
             if not eng.get("models_dir") or not models.is_dir():
                 eng["models_dir"] = str(root / "models")
+        elif engine == "gemx":
+            if not eng.get("models_dir"):
+                eng["models_dir"] = str(root / "weights")
+            if not eng.get("soma_dir"):
+                eng["soma_dir"] = str(root / "assets" / "soma")
+        elif engine == "tdpt":
+            if not eng.get("models_dir"):
+                eng["models_dir"] = str(root / "models")
 
 
 def _engine_payload() -> dict:
     status = engines.all_status(CONFIG, FLOW.status())
-    for engine_id in ("instanthmr", "flowhmr"):
+    status["instanthmr"]["camera"] = CAMERA.status()
+    status["tdpt"]["camera"] = TDPT_CAMERA.status()
+    for engine_id in ("instanthmr", "flowhmr", "gemx", "tdpt"):
         active = SETUP.active_for(engine_id)
         status[engine_id]["setup_running"] = active.id if active else None
     return status
@@ -187,6 +222,38 @@ def _check_engine(engine: str, params: dict | None = None) -> None:
             if unavailable:
                 raise RuntimeError("FlowHMR 增强项不可用：" + "、".join(unavailable)
                                    + "。请到「设置与资源」准备。")
+    elif engine == "gemx":
+        status = engines.gemx_status(CONFIG)
+        missing = []
+        if not status["root_ok"]:
+            missing.append("GEM-X 目录")
+        if not status["python_ok"]:
+            missing.append("虚拟环境")
+        if not status["deps_ok"]:
+            missing.append("Python 依赖")
+        for item in status["models"]:
+            if item["required"] and not item["exists"]:
+                missing.append(item["label"])
+        if status["device_warn"]:
+            raise RuntimeError("当前设置为 CUDA 但 torch 没有可用的 CUDA；"
+                               "请到设置里把设备改为 auto 或 cpu")
+        if missing:
+            raise RuntimeError("GEM-X 未就绪：缺少 " + "、".join(missing)
+                               + "。请到「设置与资源」准备。")
+    elif engine == "tdpt":
+        status = engines.tdpt_status(CONFIG)
+        missing = []
+        if not status["root_ok"]:
+            missing.append("TDPT 目录")
+        if not status["python_ok"]:
+            missing.append("虚拟环境")
+        if not status["deps_ok"]:
+            missing.append("Python 依赖")
+        if not status["model_ok"]:
+            missing.append("模型 " + str(status["model"]))
+        if missing:
+            raise RuntimeError("TDPT 未就绪：缺少 " + "、".join(missing)
+                               + "。请到「设置与资源」准备。")
     else:
         raise RuntimeError(f"未知引擎: {engine}")
 
@@ -215,8 +282,12 @@ def _job_params(engine: str) -> dict:
             params["fit"] = fit
         inst = CONFIG["engines"]["instanthmr"]
         params["pose_filter"] = inst.get("pose_filter", "one-euro")
+        smooth_raw = request.args.get("smooth")
+        params["smooth"] = (str(smooth_raw).lower() in ("1", "true", "on", "yes")
+                            if smooth_raw not in (None, "")
+                            else bool(inst.get("smooth", False)))
         params["focal"] = inst.get("focal")
-    else:
+    elif engine == "flowhmr":
         eng = CONFIG["engines"]["flowhmr"]
         steps_raw = request.args.get("steps")
         if steps_raw not in (None, ""):
@@ -252,6 +323,19 @@ def _job_params(engine: str) -> dict:
             params["max_frames"] = 900
         else:
             params["max_frames"] = max(30, min(10000, params["max_frames"]))
+    elif engine == "gemx":
+        params["device"] = CONFIG["engines"]["gemx"].get("device")
+    elif engine == "tdpt":
+        eng = CONFIG["engines"]["tdpt"]
+        params["device"] = eng.get("device") or "cpu"
+        smooth_raw = request.args.get("smooth")
+        params["smooth"] = (str(smooth_raw).lower() in ("1", "true", "on", "yes")
+                            if smooth_raw not in (None, "")
+                            else bool(eng.get("smooth", True)))
+        params["flip"] = bool(eng.get("flip_video", True))
+        params["scale"] = float(eng.get("scale") or 0.01)
+    else:
+        raise ValueError(f"未知引擎: {engine}")
     return params
 
 
@@ -341,6 +425,52 @@ def api_flow_stop():
     return jsonify(server=FLOW.stop())
 
 
+# --------------------------------------------------------------------------- instant camera
+@app.post("/api/instanthmr/camera/start")
+def api_instant_camera_start():
+    payload = request.get_json(silent=True) or {}
+    index = payload.get("camera_index")
+    if index in ("", None):
+        index = None
+    try:
+        return jsonify(camera=CAMERA.start(CONFIG, camera_index=index))
+    except (RuntimeError, ValueError) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/instanthmr/camera/stop")
+def api_instant_camera_stop():
+    return jsonify(camera=CAMERA.stop())
+
+
+@app.get("/api/instanthmr/camera")
+def api_instant_camera_status():
+    return jsonify(camera=CAMERA.status())
+
+
+# --------------------------------------------------------------------------- tdpt camera
+@app.post("/api/tdpt/camera/start")
+def api_tdpt_camera_start():
+    payload = request.get_json(silent=True) or {}
+    index = payload.get("camera_index")
+    if index in ("", None):
+        index = None
+    try:
+        return jsonify(camera=TDPT_CAMERA.start(CONFIG, camera_index=index))
+    except (RuntimeError, ValueError) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/tdpt/camera/stop")
+def api_tdpt_camera_stop():
+    return jsonify(camera=TDPT_CAMERA.stop())
+
+
+@app.get("/api/tdpt/camera")
+def api_tdpt_camera_status():
+    return jsonify(camera=TDPT_CAMERA.status())
+
+
 # --------------------------------------------------------------------------- jobs
 @app.get("/api/jobs")
 def api_jobs():
@@ -350,7 +480,7 @@ def api_jobs():
 @app.route("/api/jobs", methods=["POST", "PUT"])
 def api_create_job():
     engine = request.args.get("engine", "instanthmr")
-    if engine not in ("instanthmr", "flowhmr"):
+    if engine not in ("instanthmr", "flowhmr", "gemx", "tdpt"):
         return jsonify(error=f"未知引擎: {engine}"), 400
     filename = Path(request.args.get("filename") or "video.mp4").name
     if Path(filename).suffix.lower() not in VIDEO_EXTS:
@@ -525,7 +655,7 @@ def api_job_npz(job_id: str):
     path = JOBS._dir(job_id) / "motion.npz"
     if not path.is_file():
         abort(404)
-    name = f"{Path(job['filename']).stem}_instanthmr.npz"
+    name = f"{Path(job['filename']).stem}_{job.get('engine') or 'instanthmr'}.npz"
     return send_file(path, mimetype="application/octet-stream", as_attachment=True,
                      download_name=name, conditional=True)
 
@@ -669,6 +799,8 @@ def _shutdown():
     SETUP.stop_all()
     JOBS.shutdown()
     FLOW.shutdown()
+    CAMERA.shutdown()
+    TDPT_CAMERA.shutdown()
 
 
 def main() -> None:

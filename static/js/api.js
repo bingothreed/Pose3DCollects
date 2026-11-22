@@ -34,7 +34,7 @@ export const selectPerson = (id, person) => postJson(`/api/jobs/${id}/select`, {
 export const getMeta = (job) => json(job.urls.meta);
 export const getTrack = (job) => json(job.urls.track);
 
-export function uploadJob({ engine, file, maxFrames, autoFrames, model, fit, steps,
+export function uploadJob({ engine, file, maxFrames, autoFrames, model, fit, smooth, steps,
                             hamer, torsoOpt, crossing, onProgress }) {
   return new Promise((resolve, reject) => {
     const query = new URLSearchParams({
@@ -45,6 +45,7 @@ export function uploadJob({ engine, file, maxFrames, autoFrames, model, fit, ste
     });
     if (model) query.set("model", model);
     if (fit !== undefined && fit !== null) query.set("fit", String(fit));
+    if (smooth !== undefined) query.set("smooth", smooth ? "1" : "0");
     if (steps !== undefined && steps !== null) query.set("steps", String(steps));
     if (hamer !== undefined) query.set("hamer", hamer ? "1" : "0");
     if (torsoOpt !== undefined) query.set("torso_opt", torsoOpt ? "1" : "0");
@@ -74,6 +75,12 @@ export const stopSetupTask = (id) => postJson(`/api/setup/tasks/${id}/stop`, {})
 
 export const startFlowService = () => postJson("/api/flowhmr/start", {});
 export const stopFlowService = () => postJson("/api/flowhmr/stop", {});
+
+export const startInstantCamera = (payload = {}) => postJson("/api/instanthmr/camera/start", payload);
+export const stopInstantCamera = () => postJson("/api/instanthmr/camera/stop", {});
+
+export const startTdptCamera = (payload = {}) => postJson("/api/tdpt/camera/start", payload);
+export const stopTdptCamera = () => postJson("/api/tdpt/camera/stop", {});
 
 export const openFolder = (engine, which) => postJson("/api/open-folder", { engine, which });
 export const openPath = (path) => postJson("/api/open-path", { path });

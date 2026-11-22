@@ -1,11 +1,12 @@
 const listeners = new Map();
 
 const storedEngine = localStorage.getItem("p3d.engine");
+const KNOWN_ENGINES = new Set(["instanthmr", "flowhmr", "gemx", "tdpt"]);
 
 export const state = {
   config: null,
   engines: null,
-  engine: storedEngine === "flowhmr" ? "flowhmr" : "instanthmr",
+  engine: KNOWN_ENGINES.has(storedEngine) ? storedEngine : "instanthmr",
   jobs: [],
   currentJobId: null,
   currentJob: null,

@@ -46,6 +46,7 @@ export function initSettings() {
 
   $("#instantSaveBtn").addEventListener("click", () => saveInstant(true));
   $("#instantEnvBtn").addEventListener("click", () => startSetup("instanthmr", "env"));
+  $("#instantCameraBtn").addEventListener("click", toggleInstantCamera);
   $("#instantOpenModels").addEventListener("click", () => openEngineModels("instanthmr"));
   $("#copyInstantModels").addEventListener("click", () => copyPath(
     state.engines?.instanthmr?.models_dir || $("#instantModelsDir").value.trim()));
@@ -68,6 +69,31 @@ export function initSettings() {
     if (button) openModelPath(button.dataset.openPath);
   });
 
+  $("#gemxSaveBtn").addEventListener("click", () => saveGemx(true));
+  $("#gemxEnvBtn").addEventListener("click", () => startSetup("gemx", "env"));
+  $("#gemxDownloadBtn").addEventListener("click", () => startSetup("gemx", "models"));
+  $("#gemxOpenModels").addEventListener("click", () => openEngineModels("gemx"));
+  $("#copyGemxModels").addEventListener("click", () => copyPath(
+    state.engines?.gemx?.models_dir || $("#gemxModelsDir").value.trim()));
+  $("#gemxOpenRoot").addEventListener("click", () => openFolder("gemx", "root"));
+  $("#gemxModels").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-path]");
+    if (button) openModelPath(button.dataset.openPath);
+  });
+
+  $("#tdptSaveBtn").addEventListener("click", () => saveTdpt(true));
+  $("#tdptEnvBtn").addEventListener("click", () => startSetup("tdpt", "env"));
+  $("#tdptDownloadBtn").addEventListener("click", () => startSetup("tdpt", "models"));
+  $("#tdptCameraBtn").addEventListener("click", toggleTdptCamera);
+  $("#tdptOpenModels").addEventListener("click", () => openEngineModels("tdpt"));
+  $("#copyTdptModels").addEventListener("click", () => copyPath(
+    state.engines?.tdpt?.models_dir || $("#tdptModelsDir").value.trim()));
+  $("#tdptOpenRoot").addEventListener("click", () => openFolder("tdpt", "root"));
+  $("#tdptModels").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-path]");
+    if (button) openModelPath(button.dataset.openPath);
+  });
+
   $("#saveDefaultsBtn").addEventListener("click", saveDefaults);
   $("#stopSetupBtn").addEventListener("click", stopSetup);
   $("#closeSetupLog").addEventListener("click", () => show($("#setupLogCard"), false));
@@ -79,19 +105,24 @@ export function initSettings() {
   on("engine", syncSettingsEngine);
   onLanguageChange(() => {
     syncSettingsEngine();
+    if (state.engines) updateEngineStatus(state.engines);
     if (watchedTask) updateSetupTaskLabels();
   });
   syncSettingsEngine();
 }
 
 export function syncSettingsEngine() {
-  const engine = state.engine === "flowhmr" ? "flowhmr" : "instanthmr";
+  const engine = ["instanthmr", "flowhmr", "gemx", "tdpt"].includes(state.engine)
+    ? state.engine : "instanthmr";
   show($("#instantCard"), engine === "instanthmr");
   show($("#flowCard"), engine === "flowhmr");
+  show($("#gemxCard"), engine === "gemx");
+  show($("#tdptCard"), engine === "tdpt");
   show($("#poseFilterField"), engine === "instanthmr");
+  show($("#instantSmoothField"), engine === "instanthmr");
   show($("#flowManualField"), engine === "flowhmr");
   show($("#flowStaticField"), engine === "flowhmr");
-  const label = engine === "instanthmr" ? "InstantHMR" : "FlowHMR";
+  const label = { instanthmr: "InstantHMR", flowhmr: "FlowHMR", gemx: "GEM-X", tdpt: "TDPT" }[engine];
   const text = $("#settingsContextText");
   if (text) text.innerHTML = t("settings.context", { engine: label });
   const context = $("#settingsContext");
@@ -108,6 +139,10 @@ function setupTitle(title) {
   if (title.startsWith("准备 InstantHMR 环境")) return t("setup.title.prepareInstant");
   if (title.startsWith("自动配置 FlowHMR 环境")) return t("setup.title.autoFlow");
   if (title.startsWith("检查 FlowHMR 环境")) return t("setup.title.checkFlow");
+  if (title.startsWith("准备 GEM-X 环境")) return t("setup.title.prepareGemx");
+  if (title.startsWith("下载 GEM-X 模型")) return t("setup.title.downloadGemx");
+  if (title.startsWith("准备 TDPT 环境")) return t("setup.title.prepareTdpt");
+  if (title.startsWith("下载 TDPT 模型")) return t("setup.title.downloadTdpt");
   if (title.startsWith("下载 InstantHMR · ")) {
     return t("setup.title.downloadInstant", { model: title.split("·").pop().trim() });
   }
@@ -138,6 +173,7 @@ export function populateForms() {
   $("#instantModelSelect").value = inst.model || "medium";
   $("#instantFit").value = String(inst.fit ?? 2);
   $("#instantDevice").value = inst.device || "auto";
+  $("#instantCameraIndex").value = inst.camera_index ?? 0;
 
   const flow = cfg.engines.flowhmr;
   $("#flowRoot").value = flow.root || "";
@@ -146,8 +182,43 @@ export function populateForms() {
   $("#flowBasePython").value = flow.base_python || "python";
   $("#flowDevice").value = flow.device || "auto";
 
+  const gemx = cfg.engines.gemx;
+  $("#gemxRoot").value = gemx.root || "";
+  $("#gemxPython").value = gemx.python || "";
+  $("#gemxModelsDir").value = gemx.models_dir || "";
+  $("#gemxSomaDir").value = gemx.soma_dir || "";
+  $("#gemxDevice").value = gemx.device || "auto";
+  $("#gemxDetectorDevice").value = gemx.detector_device || "auto";
+  $("#gemxPoseBatch").value = String(gemx.pose_batch ?? 16);
+  $("#gemxPoseFp16").value = String(Boolean(gemx.pose_fp16));
+  $("#gemxProxy").value = gemx.proxy || "";
+
+  const tdpt = cfg.engines.tdpt;
+  $("#tdptRoot").value = tdpt.root || "";
+  $("#tdptPython").value = tdpt.python || "";
+  $("#tdptModelsDir").value = tdpt.models_dir || "";
+  $("#tdptBasePython").value = tdpt.base_python || "python";
+  $("#tdptCameraIndex").value = tdpt.camera_index ?? 0;
+  const modelSelect = $("#tdptModel");
+  if (modelSelect) {
+    const modelName = tdpt.model || "MobileNet3D3_6.onnx";
+    if (![...modelSelect.options].some((opt) => opt.value === modelName)) {
+      const opt = document.createElement("option");
+      opt.value = modelName;
+      opt.textContent = modelName;
+      modelSelect.appendChild(opt);
+    }
+    modelSelect.value = modelName;
+  }
+  $("#tdptSmooth").value = String(Boolean(tdpt.smooth));
+  $("#tdptRootSmooth").value = String(Boolean(tdpt.root_smooth));
+  $("#tdptFlipVideo").value = String(Boolean(tdpt.flip_video));
+  $("#tdptScale").value = Number(tdpt.scale ?? 0.01);
+  $("#tdptProxy").value = tdpt.proxy || "";
+
   $("#defaultMaxFrames").value = cfg.job?.max_frames ?? 300;
   $("#poseFilter").value = inst.pose_filter || "one-euro";
+  $("#instantSmooth").checked = Boolean(inst.smooth);
   $("#flowManualSelect").value = String(Boolean(flow.manual_select));
   $("#flowStaticCamera").value = String(Boolean(flow.static_camera));
   $("#ffmpegPath").value = cfg.ffmpeg || "";
@@ -157,6 +228,8 @@ export function updateEngineStatus(engines) {
   if (!engines) return;
   renderInstant(engines.instanthmr);
   renderFlow(engines.flowhmr);
+  renderGemx(engines.gemx);
+  renderTdpt(engines.tdpt);
 }
 
 function renderInstant(status) {
@@ -198,6 +271,25 @@ function renderInstant(status) {
   $("#instantModels").innerHTML = rows.join("") || `<p class="muted small">${escapeHtml(t("settings.model.none"))}</p>`;
   $("#instantEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
   $("#instantEnvBtn").disabled = busy;
+
+  const camera = status.camera || {};
+  const running = camera.status === "running";
+  const cameraBtn = $("#instantCameraBtn");
+  if (cameraBtn) {
+    cameraBtn.textContent = running ? t("settings.cameraStop") : t("settings.cameraOpen");
+    cameraBtn.disabled = busy || (!status.ready && !running);
+    cameraBtn.title = camera.status === "error" ? (camera.message || "") : "";
+  }
+  const cameraHint = $("#instantCameraHint");
+  if (cameraHint) {
+    if (running) {
+      cameraHint.textContent = t("settings.cameraRunning", { index: camera.camera_index ?? 0 });
+    } else if (camera.status === "error") {
+      cameraHint.textContent = t("settings.cameraError");
+    } else {
+      cameraHint.textContent = t("settings.cameraHint");
+    }
+  }
 }
 
 function renderFlow(status) {
@@ -291,6 +383,210 @@ function renderFlow(status) {
   }
 }
 
+function renderGemx(status) {
+  if (!status) return;
+  statusChip($("#gemxReadyChip"), status.ready, t("settings.ready"), t("settings.notReady"));
+  const missing = Object.entries(status.deps || {}).filter(([, ok]) => !ok).map(([name]) => name);
+  const checks = [
+    checkRow(t("settings.checks.project"), status.root_ok, shorten(status.root)),
+    checkRow(t("settings.checks.python"), status.python_ok,
+      status.python_version || shorten(status.python) || t("settings.detail.notCreated")),
+    checkRow(t("settings.checks.deps"), status.deps_ok,
+      missing.length ? t("settings.detail.missingDeps", { items: missing.join(", ") })
+        : "torch / transformers / onnxruntime / soma / gem"),
+    checkRow(t("settings.checks.cuda"), status.cuda_ok,
+      status.cuda_ok ? t("settings.detail.cudaYes") : t("settings.detail.cudaNo")),
+    checkRow(t("settings.checks.core"), status.ready,
+      status.ready ? t("settings.detail.allReady") : t("settings.detail.someMissing")),
+  ];
+  $("#gemxChecks").innerHTML = checks.join("");
+  const pathEl = $("#gemxModelsPath");
+  if (pathEl) {
+    pathEl.textContent = status.models_dir || "—";
+    pathEl.title = status.models_dir || "";
+  }
+
+  $("#gemxModels").innerHTML = (status.models || []).map((model) => `
+    <div class="model-row">
+      <div class="model-main">
+        <div class="model-title">${escapeHtml(model.label)}
+          ${model.required ? `<span class="chip">${escapeHtml(t("settings.required"))}</span>` : ""}</div>
+        <div class="model-file" title="${escapeHtml(model.path)}">${escapeHtml(shorten(model.path, 72))}</div>
+      </div>
+      <span class="model-state ${model.exists ? "ok" : "bad"}">${model.exists ? fmtBytes(model.size) : t("settings.model.missing")}</span>
+      <button type="button" class="link-btn" data-open-path="${escapeHtml(model.path)}"
+        title="${escapeHtml(t("settings.model.openDir"))}: ${escapeHtml(model.path)}">${t("settings.model.openDir")}</button>
+    </div>
+  `).join("");
+
+  const busy = Boolean(status.setup_running);
+  $("#gemxEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
+  $("#gemxEnvBtn").disabled = busy;
+  $("#gemxDownloadBtn").disabled = busy || !status.python_ok;
+  const hint = $("#gemxHint");
+  if (hint) {
+    if (!status.root_ok || !status.python_ok) {
+      hint.textContent = t("settings.gemx.hint.env");
+    } else if (status.device_warn) {
+      hint.textContent = t("settings.gemx.hint.cuda");
+    } else if (!status.ready) {
+      hint.textContent = t("settings.gemx.hint.models");
+    } else {
+      hint.textContent = t("settings.gemx.hint.ready");
+    }
+  }
+}
+
+function renderTdpt(status) {
+  if (!status) return;
+  statusChip($("#tdptReadyChip"), status.ready, t("settings.ready"), t("settings.notReady"));
+  const missing = Object.entries(status.deps || {}).filter(([, ok]) => !ok).map(([name]) => name);
+  const checks = [
+    checkRow(t("settings.checks.project"), status.root_ok, shorten(status.root)),
+    checkRow(t("settings.checks.python"), status.python_ok,
+      status.python_version || shorten(status.python) || t("settings.detail.notCreated")),
+    checkRow(t("settings.checks.deps"), status.deps_ok,
+      missing.length ? t("settings.detail.missingDeps", { items: missing.join(", ") })
+        : "onnxruntime / opencv / numpy"),
+    checkRow(t("settings.checks.core"), status.model_ok, status.model || ""),
+  ];
+  $("#tdptChecks").innerHTML = checks.join("");
+  const pathEl = $("#tdptModelsPath");
+  if (pathEl) {
+    pathEl.textContent = status.models_dir || "—";
+    pathEl.title = status.models_dir || "";
+  }
+
+  $("#tdptModels").innerHTML = (status.models || []).map((model) => `
+    <div class="model-row">
+      <div class="model-main">
+        <div class="model-title">${escapeHtml(model.label)}
+          ${model.required ? `<span class="chip">${escapeHtml(t("settings.required"))}</span>` : ""}</div>
+        <div class="model-file" title="${escapeHtml(model.path)}">${escapeHtml(shorten(model.path, 72))}</div>
+      </div>
+      <span class="model-state ${model.exists ? "ok" : "bad"}">${model.exists ? fmtBytes(model.size) : t("settings.model.missing")}</span>
+      <button type="button" class="link-btn" data-open-path="${escapeHtml(model.path)}"
+        title="${escapeHtml(t("settings.model.openDir"))}: ${escapeHtml(model.path)}">${t("settings.model.openDir")}</button>
+    </div>
+  `).join("");
+
+  const busy = Boolean(status.setup_running);
+  $("#tdptEnvBtn").textContent = busy ? t("settings.preparing") : t("settings.env");
+  $("#tdptEnvBtn").disabled = busy;
+  $("#tdptDownloadBtn").disabled = busy || !status.python_ok;
+
+  const camera = status.camera || {};
+  const running = camera.status === "running";
+  const cameraBtn = $("#tdptCameraBtn");
+  if (cameraBtn) {
+    cameraBtn.textContent = running ? t("settings.cameraStop") : t("settings.cameraOpen");
+    cameraBtn.disabled = busy || (!status.ready && !running);
+    cameraBtn.title = camera.status === "error" ? (camera.message || "") : "";
+  }
+  const cameraHint = $("#tdptCameraHint");
+  if (cameraHint) {
+    if (running) {
+      cameraHint.textContent = t("settings.cameraRunning", { index: camera.camera_index ?? 0 });
+    } else if (camera.status === "error") {
+      cameraHint.textContent = t("settings.cameraError");
+    } else {
+      cameraHint.textContent = t("settings.tdpt.cameraHint");
+    }
+  }
+}
+
+async function saveTdpt(notify) {
+  const payload = {
+    engines: {
+      tdpt: {
+        root: $("#tdptRoot").value.trim(),
+        python: $("#tdptPython").value.trim(),
+        models_dir: $("#tdptModelsDir").value.trim(),
+        base_python: $("#tdptBasePython").value.trim(),
+        model: $("#tdptModel").value,
+        camera_index: Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0)),
+        smooth: $("#tdptSmooth").value === "true",
+        root_smooth: $("#tdptRootSmooth").value === "true",
+        flip_video: $("#tdptFlipVideo").value === "true",
+        scale: Math.max(0.0001, Number($("#tdptScale").value) || 0.01),
+        proxy: $("#tdptProxy").value.trim(),
+      },
+    },
+  };
+  try {
+    const result = await api.saveConfig(payload);
+    state.config = result.config;
+    state.engines = result.engines;
+    updateEngineStatus(result.engines);
+    populateForms();
+    emit("config", result.config);
+    emit("engines", result.engines);
+    if (notify) toast(t("settings.toast.savedTdpt"), "success");
+    return true;
+  } catch (error) {
+    toast(error.message, "error");
+    return false;
+  }
+}
+
+async function toggleTdptCamera() {
+  const camera = state.engines?.tdpt?.camera || {};
+  const button = $("#tdptCameraBtn");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    if (camera.status === "running") {
+      await api.stopTdptCamera();
+      toast(t("settings.toast.cameraStopped"), "success");
+    } else {
+      const saved = await saveTdpt(false);
+      if (!saved) return;
+      const index = Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0));
+      toast(t("settings.toast.cameraStarting"), "info");
+      await api.startTdptCamera({ camera_index: index });
+      toast(t("settings.toast.cameraStarted", { index }), "success");
+    }
+    await refreshEngines();
+  } catch (error) {
+    toast(error.message, "error", 8000);
+    await refreshEngines();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveGemx(notify) {
+  const payload = {
+    engines: {
+      gemx: {
+        root: $("#gemxRoot").value.trim(),
+        python: $("#gemxPython").value.trim(),
+        models_dir: $("#gemxModelsDir").value.trim(),
+        soma_dir: $("#gemxSomaDir").value.trim(),
+        device: $("#gemxDevice").value,
+        detector_device: $("#gemxDetectorDevice").value,
+        pose_batch: Number($("#gemxPoseBatch").value),
+        pose_fp16: $("#gemxPoseFp16").value === "true",
+        proxy: $("#gemxProxy").value.trim(),
+      },
+    },
+  };
+  try {
+    const result = await api.saveConfig(payload);
+    state.config = result.config;
+    state.engines = result.engines;
+    updateEngineStatus(result.engines);
+    populateForms();
+    emit("config", result.config);
+    emit("engines", result.engines);
+    if (notify) toast(t("settings.toast.savedGemx"), "success");
+    return true;
+  } catch (error) {
+    toast(error.message, "error");
+    return false;
+  }
+}
+
 async function saveInstant(notify) {
   const payload = {
     engines: {
@@ -300,6 +596,7 @@ async function saveInstant(notify) {
         model: $("#instantModelSelect").value,
         fit: Number($("#instantFit").value),
         device: $("#instantDevice").value,
+        camera_index: Math.max(0, Math.trunc(Number($("#instantCameraIndex").value) || 0)),
       },
     },
   };
@@ -382,6 +679,32 @@ async function toggleFlowService() {
   }
 }
 
+async function toggleInstantCamera() {
+  const camera = state.engines?.instanthmr?.camera || {};
+  const button = $("#instantCameraBtn");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    if (camera.status === "running") {
+      await api.stopInstantCamera();
+      toast(t("settings.toast.cameraStopped"), "success");
+    } else {
+      const saved = await saveInstant(false);
+      if (!saved) return;
+      const index = Math.max(0, Math.trunc(Number($("#instantCameraIndex").value) || 0));
+      toast(t("settings.toast.cameraStarting"), "info");
+      await api.startInstantCamera({ camera_index: index });
+      toast(t("settings.toast.cameraStarted", { index }), "success");
+    }
+    await refreshEngines();
+  } catch (error) {
+    toast(error.message, "error", 8000);
+    await refreshEngines();
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function startSetup(engine, kind) {
   try {
     const response = kind === "env"
@@ -398,7 +721,10 @@ async function saveDefaults() {
     job: { max_frames: Number($("#defaultMaxFrames").value) || 0 },
     ffmpeg: $("#ffmpegPath").value.trim(),
     engines: {
-      instanthmr: { pose_filter: $("#poseFilter").value },
+      instanthmr: {
+        pose_filter: $("#poseFilter").value,
+        smooth: $("#instantSmooth").checked,
+      },
       flowhmr: {
         manual_select: $("#flowManualSelect").value === "true",
         static_camera: $("#flowStaticCamera").value === "true",
