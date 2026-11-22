@@ -143,6 +143,7 @@ def _defaults() -> dict:
                 "model": "MobileNet3D3_6.onnx",
                 "device": "cpu",
                 "smooth": True,
+                "root_smooth": False,
                 "flip_video": False,
                 "scale": 0.01,
                 "camera_index": 0,

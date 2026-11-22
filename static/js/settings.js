@@ -199,7 +199,19 @@ export function populateForms() {
   $("#tdptModelsDir").value = tdpt.models_dir || "";
   $("#tdptBasePython").value = tdpt.base_python || "python";
   $("#tdptCameraIndex").value = tdpt.camera_index ?? 0;
+  const modelSelect = $("#tdptModel");
+  if (modelSelect) {
+    const modelName = tdpt.model || "MobileNet3D3_6.onnx";
+    if (![...modelSelect.options].some((opt) => opt.value === modelName)) {
+      const opt = document.createElement("option");
+      opt.value = modelName;
+      opt.textContent = modelName;
+      modelSelect.appendChild(opt);
+    }
+    modelSelect.value = modelName;
+  }
   $("#tdptSmooth").value = String(Boolean(tdpt.smooth));
+  $("#tdptRootSmooth").value = String(Boolean(tdpt.root_smooth));
   $("#tdptFlipVideo").value = String(Boolean(tdpt.flip_video));
   $("#tdptScale").value = Number(tdpt.scale ?? 0.01);
   $("#tdptProxy").value = tdpt.proxy || "";
@@ -491,8 +503,10 @@ async function saveTdpt(notify) {
         python: $("#tdptPython").value.trim(),
         models_dir: $("#tdptModelsDir").value.trim(),
         base_python: $("#tdptBasePython").value.trim(),
+        model: $("#tdptModel").value,
         camera_index: Math.max(0, Math.trunc(Number($("#tdptCameraIndex").value) || 0)),
         smooth: $("#tdptSmooth").value === "true",
+        root_smooth: $("#tdptRootSmooth").value === "true",
         flip_video: $("#tdptFlipVideo").value === "true",
         scale: Math.max(0.0001, Number($("#tdptScale").value) || 0.01),
         proxy: $("#tdptProxy").value.trim(),

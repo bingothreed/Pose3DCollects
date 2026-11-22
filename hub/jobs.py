@@ -476,6 +476,9 @@ class JobManager:
                 "--out", str(out_dir), "--model", str(model_path),
                 "--max-frames", str(max_frames),
                 "--smooth", "1" if params.get("smooth", status.get("smooth", True)) else "0",
+                "--root-smooth",
+                "1" if params.get("root_smooth",
+                                  status.get("root_smooth", False)) else "0",
                 "--flip", "1" if params.get("flip", status.get("flip_video", True)) else "0",
                 "--scale", str(params.get("scale", status.get("scale", 0.01))),
             ]

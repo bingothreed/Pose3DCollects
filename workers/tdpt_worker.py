@@ -1,10 +1,12 @@
 """Run TDPT (ThreeDPoseTracker VNect) on a video inside the TDPT venv.
 
-The hub launches this with the TDPT project's Python. It runs the tiny
-MobileNet3D3_6.onnx on CPU per frame, decodes 24 joints + 4 derived joints,
+The hub launches this with the TDPT project's Python. It supports both the
+single-frame MobileNet3D3_6.onnx and the three-input ThreeDPoseLibrary model,
+decodes 24 joints from the 2D and 3D heads, applies the library's
+Kalman -> low-pass -> One-Euro cascade to both and derives 4 extra joints,
 synthesizes a capsule mesh for the 3D viewer and writes the unified result
-package (float16 vertex stream + faces + meta + 2D track) with JSON lines on
-stdout.
+package (float16 vertex stream + faces + meta + 2D head track) with JSON
+lines on stdout.
 """
 from __future__ import annotations
 
@@ -17,7 +19,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
 # Per-joint score below which the frame is treated as "no person" and the last
 # valid pose is held. A clear full-body frame scores ~0.5-0.9.
@@ -39,9 +40,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project", required=True, help="TDPT project root")
     parser.add_argument("--video", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--model", required=True, help="MobileNet3D3_6.onnx path")
+    parser.add_argument("--model", required=True,
+                        help="VNect ONNX path (224 single-frame or 448 three-frame)")
     parser.add_argument("--max-frames", type=int, default=0, help="0 = all frames")
-    parser.add_argument("--smooth", type=int, default=1, help="1 = One-Euro smoothing")
+    parser.add_argument("--smooth", type=int, default=1,
+                        help="1 = Kalman + low-pass + One-Euro post-processing")
+    parser.add_argument("--root-smooth", type=int, default=0,
+                        help="1 = avatar-root depth Kalman (body height -> z offset)")
     parser.add_argument("--flip", type=int, default=0,
                         help="1 = flip frames vertically (Unity texture orientation)")
     parser.add_argument("--scale", type=float, default=DEFAULT_SCALE,
@@ -49,28 +54,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_session(model: Path):
-    if not model.is_file():
-        raise RuntimeError(f"模型不存在: {model}")
-    ort.set_default_logger_severity(3)  # silence UTF-16 console warnings on Windows
-    sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
-    input_name = sess.get_inputs()[0].name
-    probe = sess.run(None, {input_name: np.zeros((1, 3, 224, 224), np.float32)})
-    by_shape = {tuple(o.shape): o for o in probe}
-    heat_key = (1, 24 * 14, 14, 14)
-    off_key = (1, 24 * 3 * 14, 14, 14)
-    if heat_key not in by_shape or off_key not in by_shape:
-        raise RuntimeError(f"模型输出与 VNect 布局不符: {list(by_shape)}")
-    return sess, input_name, heat_key, off_key
-
-
 def main() -> None:
     args = parse_args()
     project = Path(args.project).resolve()
     if str(project) not in sys.path:
         sys.path.insert(0, str(project))
-    from tdpt_vnect import (ALL_JOINT_NAMES, EDGES_2D, MESH_FACES, decode, derive,
-                            project2d, synthesize_mesh, OneEuro)
+    from tdpt_vnect import (ALL_JOINT_NAMES, EDGES_2D, MESH_FACES, PoseFilter,
+                            RootDepthSmoother, VNectRunner, derive, project2d,
+                            synthesize_mesh)
 
     out = Path(args.out).resolve()
     (out / "mesh").mkdir(parents=True, exist_ok=True)
@@ -85,20 +76,28 @@ def main() -> None:
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     source_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
-    sess, input_name, heat_key, off_key = load_session(Path(args.model))
-    emit(type="log", message=f"加载 TDPT (VNect) 模型（CPU）…")
+    model_path = Path(args.model)
+    if not model_path.is_file():
+        raise RuntimeError(f"模型不存在: {model_path}")
+    runner = VNectRunner(model_path)
+    emit(type="log", message=f"加载 TDPT (VNect) 模型（CPU）… {runner.model_kind}")
     scale = float(args.scale)
     if scale <= 0:
         raise RuntimeError("缩放值必须大于 0")
     emit(type="log", message=f"视频 {width}x{height} @ {fps:.2f} fps，"
                              f"关节 {len(ALL_JOINT_NAMES)}，缩放 {scale:g}，"
-                             f"{'One-Euro 平滑' if args.smooth else '无滤波'}"
+                             f"帧窗口 {runner.frame_window}，"
+                             f"2D 头 {'有' if runner.has_2d else '无'}，"
+                             f"{'2D+3D Kalman + 低通 + One-Euro' if args.smooth else '无滤波'}"
+                             + ("，根节点深度平滑" if args.root_smooth else "")
                              + ("，垂直翻转输入" if args.flip else ""))
 
     max_frames = max(0, args.max_frames)
     total = min(source_frame_count, max_frames) if source_frame_count and max_frames else (
         source_frame_count or max_frames)
-    filters = [OneEuro() for _ in range(28)] if args.smooth else None
+    filters3d = PoseFilter() if args.smooth else None
+    filters2d = PoseFilter() if args.smooth else None
+    root_smoother = RootDepthSmoother() if args.root_smooth else None
 
     vertices_path = out / "mesh" / "vertices.bin"
     joints_path = out / "mesh" / "joints.bin"
@@ -106,6 +105,7 @@ def main() -> None:
     joints2d_all = []
     boxes_all = []
     last_joints = None
+    last_joints_2d = None
     bbox_min = np.array([np.inf, np.inf, np.inf], np.float32)
     bbox_max = np.array([-np.inf, -np.inf, -np.inf], np.float32)
     root_trajectory = []
@@ -122,30 +122,38 @@ def main() -> None:
                 break
             if args.flip:
                 bgr = cv2.flip(bgr, 0)
-            rgb = cv2.cvtColor(cv2.resize(bgr, (224, 224)), cv2.COLOR_BGR2RGB)
-            x = (rgb.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
             t0 = time.perf_counter()
-            outs = sess.run(None, {input_name: x})
-            by_shape = {tuple(o.shape): o for o in outs}
-            kps, scores = decode(by_shape[heat_key][0], by_shape[off_key][0])
-            kps28 = derive(kps)
+            frame = runner.infer(bgr)
             durations.append((time.perf_counter() - t0) * 1000.0)
 
-            mean_score = float(scores.mean())
+            mean_score = float(frame.scores.mean())
             if mean_score >= SCORE_THRESHOLD:
-                if filters is not None:
-                    now = time.perf_counter()
-                    for i in range(28):
-                        kps28[i] = filters[i].filter(kps28[i], now)
-                last_joints = kps28
+                # Same order as TDPBarracudaRunner: filter the 24 model
+                # joints (2D and 3D separately), then derive hip/head/neck/spine.
+                now = (index + 1) / fps
+                kps3, kps2 = frame.joints3d, frame.joints2d
+                if filters3d is not None:
+                    kps3 = filters3d.apply(kps3, now)
+                if filters2d is not None and kps2 is not None:
+                    kps2 = filters2d.apply(kps2, now)
+                last_joints = derive(kps3 * runner.unit_scale)
+                last_joints_2d = (derive(kps2 * runner.unit_scale)
+                                  if kps2 is not None else last_joints.copy())
+                if root_smoother is not None:
+                    root_smoother.update(last_joints, frame.scores)
                 seen_person = True
             else:
                 empty += 1
                 if last_joints is None:
                     last_joints = np.zeros((28, 3), np.float32)
+                if last_joints_2d is None:
+                    last_joints_2d = np.zeros((28, 3), np.float32)
 
-            px = project2d(last_joints, width, height)
+            px = project2d(last_joints_2d, width, height)
             scaled_joints = last_joints * scale
+            if root_smoother is not None:
+                # Root translation is in scene units, like the Unity avatar.
+                scaled_joints[:, 2] += root_smoother.offset
             mesh = synthesize_mesh(scaled_joints,
                                    radius=max(3.0 * scale, 0.015))
             vertex_file.write(np.asarray(mesh, np.float16).tobytes())
@@ -217,7 +225,18 @@ def main() -> None:
                     "elapsed_s": round(time.perf_counter() - started, 2)},
         "device": "cpu",
         "model": Path(args.model).name,
+        "model_kind": runner.model_kind,
+        "input_size": runner.input_size,
+        "frame_window": runner.frame_window,
+        "heatmap": runner.heat_size,
         "smooth": bool(args.smooth),
+        "two_d_head": runner.has_2d,
+        "filters": (["kalman", "lowpass", "one_euro"] if args.smooth else []),
+        "filters_2d": (["kalman", "lowpass", "one_euro"]
+                       if args.smooth and runner.has_2d else []),
+        "root_smooth": bool(args.root_smooth),
+        "root_smooth_final_offset": (round(root_smoother.offset, 4)
+                                     if root_smoother is not None else None),
         "flip": bool(args.flip),
         "scale": scale,
         "source_total_frames": source_frame_count or None,

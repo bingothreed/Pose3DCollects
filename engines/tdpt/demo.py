@@ -1,8 +1,10 @@
 """TDPT live camera demo (OpenCV window with skeleton overlay).
 
 Mirrors ThreeDPoseTracker's webcam experience: per-frame VNect inference on
-CPU, skeleton drawn over the frame, FPS in the title bar. Close the window
-or press ESC / Q to quit.
+CPU, skeleton drawn over the frame, FPS in the title bar.  The three-input
+model gets a sliding window of consecutive frames; post-processing follows
+ThreeDPoseLibrary (Kalman -> low-pass -> One-Euro on both the 2D and 3D
+heads).  Close the window or press ESC / Q to quit.
 
     python demo.py --camera 0 --model models/MobileNet3D3_6.onnx
 """
@@ -15,17 +17,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 
-from tdpt_vnect import (ALL_JOINT_NAMES, EDGES, IMG, decode, derive, project2d,
-                        OneEuro)
+from tdpt_vnect import EDGES, PoseFilter, VNectRunner, derive, project2d
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--no-smooth", action="store_true", help="disable 1 Euro filter")
+    parser.add_argument("--no-smooth", action="store_true",
+                        help="disable Kalman / low-pass / One-Euro post-processing")
     parser.add_argument("--flip", action="store_true",
                         help="flip frames vertically (only if the picture is upside down)")
     return parser.parse_args()
@@ -38,16 +39,10 @@ def main() -> None:
         raise SystemExit(f"model not found: {model_path}")
 
     print(f"[tdpt] loading {model_path.name} (CPU)…", flush=True)
-    ort.set_default_logger_severity(3)  # silence UTF-16 console warnings on Windows
-    sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-    input_name = sess.get_inputs()[0].name
-    outputs = sess.run(None, {input_name: np.zeros((1, 3, IMG, IMG), np.float32)})
-    by_shape = {tuple(o.shape): o for o in outputs}
-    heat_key = (1, 24 * 14, 14, 14)
-    off_key = (1, 24 * 3 * 14, 14, 14)
-    if heat_key not in by_shape or off_key not in by_shape:
-        raise SystemExit("model outputs don't match VNect layout "
-                         f"(got {list(by_shape)})")
+    runner = VNectRunner(model_path)
+    print(f"[tdpt] model {runner.model_kind}, heatmap {runner.heat_size}x"
+          f"{runner.heat_size}, 2D head {'yes' if runner.has_2d else 'no'}, "
+          f"frame window {runner.frame_window}", flush=True)
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -56,7 +51,9 @@ def main() -> None:
 
     flip = args.flip
     smooth = not args.no_smooth
-    filters = [OneEuro() for _ in range(28)] if smooth else None
+    filters3d = PoseFilter() if smooth else None
+    filters2d = PoseFilter() if smooth and runner.has_2d else None
+    started = time.perf_counter()
     scores = np.zeros(28, np.float32)
     fps_smooth = 0.0
 
@@ -68,19 +65,17 @@ def main() -> None:
         if flip:
             frame = cv2.flip(frame, 0)
         h, w = frame.shape[:2]
-        rgb = cv2.cvtColor(cv2.resize(frame, (IMG, IMG)), cv2.COLOR_BGR2RGB)
-        x = (rgb.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
-        outs = sess.run(None, {input_name: x})
-        by_shape = {tuple(o.shape): o for o in outs}
-        heat3d = by_shape[heat_key][0]
-        off3d = by_shape[off_key][0]
-        kps, sc = decode(heat3d, off3d)
-        kps28 = derive(kps)
-        scores[:24] = sc
-        if filters is not None:
-            now = time.perf_counter()
-            for i in range(28):
-                kps28[i] = filters[i].filter(kps28[i], now)
+        out = runner.infer(frame)
+        now = t0 - started
+        kps3 = out.joints3d
+        kps2 = out.joints2d
+        if filters3d:
+            kps3 = filters3d.apply(kps3, now)
+        if filters2d and kps2 is not None:
+            kps2 = filters2d.apply(kps2, now)
+        draw = kps2 if kps2 is not None else kps3
+        kps28 = derive(draw * runner.unit_scale)
+        scores[:24] = out.scores2d if out.scores2d is not None else out.scores
 
         # Draw 2D overlay on the (flipped) frame with score colors.
         px = project2d(kps28, w, h)

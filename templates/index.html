@@ -496,7 +496,7 @@
             <button type="button" class="btn ghost" id="tdptOpenModels" data-i18n="settings.openFolder">打开文件夹</button>
           </div>
         </div>
-        <p class="model-location-note" data-i18n="settings.tdpt.locationNote">模型目标位置见下表（来自 digital-standard/ThreeDPoseTracker 公共仓库）；点行尾「打开目录」可直接打开或创建文件夹，或用「自动下载模型」一键获取（约 33 MB）。</p>
+        <p class="model-location-note" data-i18n="settings.tdpt.locationNote">模型目标位置见下表：单帧 224 模型来自 digital-standard/ThreeDPoseTracker 公共仓库（可用「自动下载模型」获取，约 33 MB）；3 帧 448 模型来自 ThreeDPoseLibrary，需要放到模型目录（不会自动下载）。</p>
         <div class="model-table" id="tdptModels"></div>
         <div class="inline-form">
           <label class="field wide"><span data-i18n="settings.projectDir">项目目录</span><input type="text" id="tdptRoot" placeholder="TDPT 根目录" data-i18n-placeholder="settings.tdptRootPlaceholder"></label>
@@ -508,11 +508,26 @@
           <label class="field"><span data-i18n="settings.cameraIndex">摄像头编号</span><input type="number" id="tdptCameraIndex" min="0" max="15" step="1"></label>
         </div>
         <div class="inline-form">
-          <label class="field"><span data-i18n="settings.smoothing">输出平滑（1€ 滤波）</span>
+          <label class="field wide"><span data-i18n="settings.tdpt.model">模型（帧窗口）</span>
+            <select id="tdptModel">
+              <option value="ThreeDPoseTracker_3frames.onnx" data-i18n="settings.tdpt.model3">3 帧 · 448（ThreeDPoseLibrary）</option>
+              <option value="MobileNet3D3_6.onnx" data-i18n="settings.tdpt.model1">单帧 · 224（公共模型）</option>
+            </select>
+            <small data-i18n="settings.tdpt.modelHint">3 帧模型使用连续三帧滑动窗口，时序更稳；单帧模型推理更快。</small>
+          </label>
+          <label class="field"><span data-i18n="settings.tdpt.smoothing">后处理滤波（Kalman + 低通 + 1€）</span>
             <select id="tdptSmooth">
               <option value="true" data-i18n="settings.on">开</option>
               <option value="false" data-i18n="settings.off">关</option>
             </select>
+            <small data-i18n="settings.tdpt.smoothingHint">与 ThreeDPoseLibrary 一致：2D、3D 各自按关节依次 Kalman → 低通 → 1€。</small>
+          </label>
+          <label class="field"><span data-i18n="settings.tdpt.rootSmooth">根节点深度平滑</span>
+            <select id="tdptRootSmooth">
+              <option value="false" data-i18n="settings.off">关</option>
+              <option value="true" data-i18n="settings.on">开</option>
+            </select>
+            <small data-i18n="settings.tdpt.rootSmoothHint">按身高估计并平滑根节点 z 位移（ThreeDPoseLibrary avatar 根 Kalman）；开启会改变 root_trajectory</small>
           </label>
           <label class="field"><span data-i18n="settings.tdpt.flip">视频输入垂直翻转</span>
             <select id="tdptFlipVideo">

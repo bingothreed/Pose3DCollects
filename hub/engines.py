@@ -27,6 +27,8 @@ INSTANT_DOWNLOAD_MODULES = ["huggingface_hub"]
 GEMX_MODULES = ["torch", "cv2", "numpy", "onnxruntime", "transformers", "soma", "gem"]
 
 TDPT_MODULES = ["onnxruntime", "cv2", "numpy"]
+TDPT_MODEL_SINGLE = "MobileNet3D3_6.onnx"
+TDPT_MODEL_THREE = "ThreeDPoseTracker_3frames.onnx"
 TDPT_MODEL_URL = ("https://raw.githubusercontent.com/digital-standard/ThreeDPoseTracker/"
                   "master/Assets/Model/MobileNet3D3_6.onnx")
 GEMX_SOMA_FILES = [
@@ -484,7 +486,7 @@ def tdpt_python(cfg: dict) -> str:
 def tdpt_model_path(cfg: dict) -> Path:
     engine = cfg["engines"]["tdpt"]
     models_dir = Path(engine.get("models_dir") or Path(engine["root"]) / "models")
-    return models_dir / (engine.get("model") or "MobileNet3D3_6.onnx")
+    return models_dir / (engine.get("model") or TDPT_MODEL_SINGLE)
 
 
 def tdpt_status(cfg: dict) -> dict:
@@ -499,18 +501,31 @@ def tdpt_status(cfg: dict) -> dict:
     deps_ok = python_ok and all(deps.values())
     model_info = file_info(model_path)
     ready = root_ok and python_ok and deps_ok and model_info["exists"]
+    known = [
+        (TDPT_MODEL_THREE, "TDPT 3 帧模型（ThreeDPoseLibrary）",
+         "448px · 三帧窗口 · 本地转换，非自动下载"),
+        (TDPT_MODEL_SINGLE, "TDPT 单帧模型（公共）",
+         "224px · MobileNet3D3_6 · 约 33 MB"),
+    ]
+    models = []
+    for name, label, note in known:
+        path = models_dir / name
+        models.append(_model_row(label, path, path == model_path, note))
+    if model_path not in (models_dir / name for name, _, _ in known):
+        models.append(_model_row("TDPT 自定义模型", model_path, True))
     return {
         "id": "tdpt",
         "name": "TDPT",
-        "subtitle": "VNect · 轻量实时 3D 骨架",
+        "subtitle": "VNect · 3 帧窗口 / 单帧 3D 骨架",
         "root": str(root),
         "python": python,
         "python_version": python_version(python) if python_ok else "",
         "models_dir": str(models_dir),
-        "model": engine.get("model") or "MobileNet3D3_6.onnx",
+        "model": engine.get("model") or TDPT_MODEL_SINGLE,
         "model_path": str(model_path),
         "device": engine.get("device", "cpu"),
         "smooth": bool(engine.get("smooth", True)),
+        "root_smooth": bool(engine.get("root_smooth", False)),
         "flip_video": bool(engine.get("flip_video", True)),
         "scale": float(engine.get("scale") or 0.01),
         "camera_index": int(engine.get("camera_index") or 0),
@@ -519,7 +534,7 @@ def tdpt_status(cfg: dict) -> dict:
         "python_ok": python_ok,
         "deps": deps,
         "deps_ok": deps_ok,
-        "models": [_model_row("TDPT (VNect) 模型", model_path, True, "MobileNet3D3_6.onnx（约 33 MB）")],
+        "models": models,
         "model_ok": model_info["exists"],
         "ready": ready,
         "env_kind": "venv" if python_ok else ("project" if root_ok else "missing"),
