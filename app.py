@@ -314,7 +314,7 @@ def _job_params(engine: str) -> dict:
         smooth_raw = request.args.get("smooth")
         params["smooth"] = (str(smooth_raw).lower() in ("1", "true", "on", "yes")
                             if smooth_raw not in (None, "")
-                            else bool(inst.get("smooth", False)))
+                            else bool(inst.get("smooth", True)))
         params["focal"] = inst.get("focal")
     elif engine == "flowhmr":
         eng = CONFIG["engines"]["flowhmr"]
