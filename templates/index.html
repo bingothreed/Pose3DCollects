@@ -384,7 +384,14 @@
         </div>
         <p class="hint wide" data-i18n="settings.embeddedNote">已内置：源码、模型目录和虚拟环境均位于 engines/ 下，由「自动配置环境」与模型下载任务管理。</p>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="instantProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
+          <label class="field wide">
+            <span data-i18n="settings.proxy">下载代理（HTTP）</span>
+            <div class="proxy-row">
+              <input type="text" id="instantProxy" placeholder="http://127.0.0.1:21882 或留空">
+              <button type="button" class="btn ghost proxy-test-btn" data-proxy-input="instantProxy" data-i18n="settings.proxyTest">测试</button>
+              <span class="proxy-test-result" id="instantProxyResult"></span>
+            </div>
+          </label>
         </div>
         <div class="inline-form">
           <label class="field"><span data-i18n="settings.defaultModel">默认模型</span>
@@ -470,7 +477,14 @@
           </label>
         </div>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="gemxProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
+          <label class="field wide">
+            <span data-i18n="settings.proxy">下载代理（HTTP）</span>
+            <div class="proxy-row">
+              <input type="text" id="gemxProxy" placeholder="http://127.0.0.1:21882 或留空">
+              <button type="button" class="btn ghost proxy-test-btn" data-proxy-input="gemxProxy" data-i18n="settings.proxyTest">测试</button>
+              <span class="proxy-test-result" id="gemxProxyResult"></span>
+            </div>
+          </label>
         </div>
         <div class="card-actions">
           <button type="button" class="btn primary" id="gemxSaveBtn" data-i18n="settings.saveGemx">保存并检测</button>
@@ -558,7 +572,14 @@
           <label class="field"><span data-i18n="settings.tdpt.scale">输出缩放</span><input type="number" id="tdptScale" min="0.0001" step="0.001">
             <small data-i18n="settings.tdpt.scaleHint">模型单位 × 缩放 = 场景单位（默认 0.01 ≈ 米制）</small>
           </label>
-          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="tdptProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
+          <label class="field wide">
+            <span data-i18n="settings.proxy">下载代理（HTTP）</span>
+            <div class="proxy-row">
+              <input type="text" id="tdptProxy" placeholder="http://127.0.0.1:21882 或留空">
+              <button type="button" class="btn ghost proxy-test-btn" data-proxy-input="tdptProxy" data-i18n="settings.proxyTest">测试</button>
+              <span class="proxy-test-result" id="tdptProxyResult"></span>
+            </div>
+          </label>
         </div>
         <div class="card-actions">
           <button type="button" class="btn primary" id="tdptSaveBtn" data-i18n="settings.saveTdpt">保存并检测</button>
@@ -613,7 +634,14 @@
         </div>
         <p class="hint wide" data-i18n="settings.flow.embeddedNote">已内置：FlowHMR 源码位于 engines/flowhmr，运行时环境由「自动配置环境」创建（需要 Python 3.10）。</p>
         <div class="inline-form">
-          <label class="field wide"><span data-i18n="settings.proxy">下载代理（HTTP）</span><input type="text" id="flowProxy" placeholder="http://127.0.0.1:21882 或留空"></label>
+          <label class="field wide">
+            <span data-i18n="settings.proxy">下载代理（HTTP）</span>
+            <div class="proxy-row">
+              <input type="text" id="flowProxy" placeholder="http://127.0.0.1:21882 或留空">
+              <button type="button" class="btn ghost proxy-test-btn" data-proxy-input="flowProxy" data-i18n="settings.proxyTest">测试</button>
+              <span class="proxy-test-result" id="flowProxyResult"></span>
+            </div>
+          </label>
         </div>
         <div class="card-actions">
           <button type="button" class="btn primary" id="flowSaveBtn" data-i18n="settings.saveFlow">保存并检测</button>

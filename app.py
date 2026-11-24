@@ -11,8 +11,10 @@ import atexit
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -403,6 +405,71 @@ def api_engines():
 @app.get("/api/health")
 def api_health():
     return jsonify(ok=True, app="Pose3D Collects", version="0.1.0")
+
+
+# --------------------------------------------------------------------------- proxy test
+PROXY_TEST_URL = "https://www.google.com/generate_204"  # tiny 204 response, no body
+
+
+@app.post("/api/proxy/test")
+def api_proxy_test():
+    """Probe Google through the given HTTP proxy with curl; report latency."""
+    payload = request.get_json(silent=True) or {}
+    proxy = str(payload.get("proxy") or "").strip()
+    if proxy and "://" not in proxy:
+        proxy = "http://" + proxy
+    # Windows curl uses schannel, which by default checks certificate
+    # revocation online.  Behind a VPN proxy the CRL/OCSP server is often
+    # unreachable, so handshakes fail intermittently with curl exit 35
+    # (CRYPT_E_REVOCATION_OFFLINE).  Even with --ssl-no-revoke some VPN
+    # proxies still flap the CONNECT tunnel, so probe a few times and call
+    # the proxy alive as soon as one attempt gets an HTTP status.
+    cmd = ["curl", "-sS", "-o", os.devnull,
+           "-w", "%{http_code}", "--max-time", "10"]
+    if os.name == "nt":
+        # --ssl-no-revoke exists only on Windows curl (schannel); other
+        # platforms' curl (OpenSSL) rejects it as an unknown option.
+        cmd.insert(2, "--ssl-no-revoke")
+    if proxy:
+        cmd += ["-x", proxy]
+    else:
+        # Blank field means a real direct test, not the hub's own proxy env.
+        cmd += ["--noproxy", "*"]
+    cmd.append(PROXY_TEST_URL)
+    started = time.monotonic()
+    attempts = 3 if proxy else 1
+    status, ok, error = None, False, ""
+    for attempt in range(attempts):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+            code = proc.stdout.strip()
+            status = int(code) if code.isdigit() else None
+            if status == 0:  # curl prints 000 when no HTTP response was received
+                status = None
+            # Any HTTP status (even 4xx) means the proxy tunnel itself worked.
+            if proc.returncode == 0 and status and status > 0:
+                ok, error = True, ""
+                break
+            error = (proc.stderr.strip()
+                     or (f"HTTP {status}" if status else f"curl exit {proc.returncode}"))
+        except subprocess.TimeoutExpired:
+            status = None
+            error = "curl timed out after 10 seconds"
+        except FileNotFoundError:
+            status, ok = None, False
+            error = "curl executable not found"
+            break
+        except Exception as exc:
+            status, ok = None, False
+            error = str(exc)
+            break
+        if attempt + 1 < attempts:
+            time.sleep(0.4)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if not ok and attempts > 1 and error:
+        error = f"{attempts} 次尝试均失败（{error}）"
+    return jsonify(ok=ok, status=status, elapsed_ms=elapsed_ms,
+                   error=error, proxy=proxy or None, target=PROXY_TEST_URL)
 
 
 # --------------------------------------------------------------------------- setup

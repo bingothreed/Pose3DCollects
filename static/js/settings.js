@@ -94,6 +94,9 @@ export function initSettings() {
     if (button) openModelPath(button.dataset.openPath);
   });
 
+  document.querySelectorAll(".proxy-test-btn").forEach((button) => {
+    button.addEventListener("click", () => testProxy(button));
+  });
   $("#saveDefaultsBtn").addEventListener("click", saveDefaults);
   $("#stopSetupBtn").addEventListener("click", stopSetup);
   $("#closeSetupLog").addEventListener("click", () => show($("#setupLogCard"), false));
@@ -107,6 +110,10 @@ export function initSettings() {
     syncSettingsEngine();
     if (state.engines) updateEngineStatus(state.engines);
     if (watchedTask) updateSetupTaskLabels();
+    document.querySelectorAll(".proxy-test-result").forEach((el) => {
+      el.textContent = "";
+      el.className = "proxy-test-result";
+    });
   });
   syncSettingsEngine();
 }
@@ -162,6 +169,12 @@ function updateSetupTaskLabels() {
   if (!watchedTask) return;
   $("#setupLogTitle").textContent = setupTitle(watchedTask.title || "");
   $("#setupLogStatus").textContent = setupStatusLabel(watchedTask.status);
+  const subtitle = $("#setupLogSubtitle");
+  if (subtitle) {
+    subtitle.textContent = watchedTask.progress
+      ? `${t("settings.setupLog.live")} · ${watchedTask.progress}`
+      : t("settings.setupLog.live");
+  }
 }
 
 export function populateForms() {
@@ -885,6 +898,7 @@ async function pollSetup() {
   try {
     const view = await api.getSetupTask(watchedTask.id, setupOffset);
     watchedTask = { ...watchedTask, ...view };
+    updateSetupTaskLabels();
     const log = $("#setupLog");
     if (view.lines?.length) {
       setupOffset = view.next;
@@ -920,5 +934,39 @@ async function stopSetup() {
     toast(t("settings.toast.setupStop"), "warn");
   } catch (error) {
     toast(error.message, "error");
+  }
+}
+
+async function testProxy(button) {
+  const inputId = button.dataset.proxyInput;
+  const input = document.getElementById(inputId);
+  const result = document.getElementById(`${inputId}Result`);
+  if (!input || !result) return;
+  const proxy = input.value.trim();
+  const label = proxy || t("settings.proxyDirect");
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = t("settings.proxyTesting");
+  result.textContent = "";
+  result.className = "proxy-test-result";
+  result.title = label;
+  try {
+    const view = await api.testProxy(proxy);
+    if (view.ok) {
+      result.textContent = t("settings.proxyTestOk", { ms: view.elapsed_ms });
+      result.className = "proxy-test-result ok";
+      result.title = `${label} · HTTP ${view.status ?? 204} · ${view.target}`;
+    } else {
+      result.textContent = t("settings.proxyTestFail", { reason: view.error || "unknown" });
+      result.className = "proxy-test-result bad";
+      result.title = `${label} · ${view.error || ""}`;
+    }
+  } catch (error) {
+    result.textContent = t("settings.proxyTestFail", { reason: error.message });
+    result.className = "proxy-test-result bad";
+    result.title = `${label} · ${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
   }
 }

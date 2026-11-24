@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import socket
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import config as cfgmod
 from .utils import (file_info, kill_tree, now, probe_python_candidates, python_version,
@@ -620,6 +624,15 @@ class SetupTask:
         self.ended: float | None = None
         self.error: str | None = None
         self.lines: list[str] = []
+        # Latest live download speed / progress, e.g. "11.3/11.3 MB · 899.3 kB/s".
+        # Kept separate from ``lines`` so pip's per-frame progress output does
+        # not flood the log (a large wheel emits hundreds of frames per second).
+        self.progress: str = ""
+        # (done, total, monotonic clock) of the previous byte-pair progress
+        # frame, used to derive a live speed for frames that carry no rate of
+        # their own (worker percent lines, early tqdm frames).  Cleared
+        # whenever a non-progress line or a new file interrupts the sequence.
+        self.speed_prev: tuple[float, float, float] | None = None
         self.lock = threading.Lock()
         self.process: subprocess.Popen | None = None
         self.cancelled = False
@@ -631,6 +644,10 @@ class SetupTask:
             if len(self.lines) > 4000:
                 del self.lines[:len(self.lines) - 4000]
 
+    def set_progress(self, text: str) -> None:
+        with self.lock:
+            self.progress = str(text)
+
     def view(self, offset: int = 0) -> dict:
         with self.lock:
             lines = self.lines[offset:]
@@ -639,6 +656,7 @@ class SetupTask:
                 "status": self.status, "error": self.error,
                 "started": self.started, "ended": self.ended,
                 "lines": lines, "next": offset + len(lines),
+                "progress": self.progress,
             }
 
 
@@ -725,6 +743,161 @@ def _proxy_env(proxy: str, base: dict | None = None) -> dict:
     return env
 
 
+def _proxy_reachable(proxy: str, timeout: float = 3.0) -> bool:
+    """Best-effort TCP check so the log can report whether the proxy is alive."""
+    try:
+        parsed = urlparse(proxy if "://" in proxy else "http://" + proxy)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _env_with_proxy(proxy: str, base: dict | None = None) -> tuple[dict, str]:
+    """Use the *configured* proxy (not the ambient one) and describe the result.
+
+    The hub is launched from an environment that may already define HTTP_PROXY
+    for its own traffic.  Inheriting that by accident made the setup tasks use
+    a different proxy than the model downloads, so always set it explicitly.
+    """
+    env = _setup_env(base)
+    ambient = (env.get("HTTPS_PROXY") or env.get("https_proxy")
+               or env.get("HTTP_PROXY") or env.get("http_proxy") or "")
+    proxy = str(proxy or "").strip()
+    if not proxy:
+        return env, (f"未配置（继承系统代理 {ambient}）" if ambient else "未配置（直连）")
+    if _proxy_reachable(proxy):
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            env[key] = proxy
+        return env, f"{proxy}（已启用 · 可连接）"
+    # A dead configured proxy would stall the whole install; fall back to a
+    # direct connection and say so loudly in the log.
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        env.pop(key, None)
+    return env, (f"{proxy}（无法连接，本次直连；系统代理 {ambient} 已忽略）"
+                 if ambient else f"{proxy}（无法连接，本次直连）")
+
+
+# pip emits a live download bar as individual CR/LF-terminated frames when its
+# stdout is a pipe (PIP_PROGRESS_BAR=on).  Keep those frames out of ``lines`` —
+# a single wheel produces hundreds — and expose only the latest one as the
+# task's live ``progress`` value for the UI.
+_PIP_SPEED_RE = re.compile(
+    r"([\d.]+)\s*/\s*([\d.]+)\s*([kKMGT]?i?B)\s+([\d.]+\s*[kKMGT]?i?B/s)"
+)
+# Generic progress frames, covering the tqdm bars huggingface_hub writes for
+# the GEM-X / SOMA / InstantHMR files and the plain percent lines printed by
+# workers/download_*_models.py:
+#   " 12%|█▏  | 41.9M/368M [00:06<00:44, 7.31MB/s]"
+#   "  45% (166/368 MB)"      (gemx worker)
+#   "  12.5 / 33.1 MB"        (tdpt worker)
+# A frame may carry a byte pair, a percentage, and/or a rate; when the rate is
+# missing it is derived from two consecutive byte-pair frames of the same file.
+_PROGRESS_HEAD_RE = re.compile(r"^\s*\d")
+_BYTES_PAIR_RE = re.compile(
+    r"(?P<done>[\d.,]+)\s*(?P<du>[kKmMgGtT]?[iI]?[bB]?)\s*/\s*"
+    r"(?P<total>[\d.,]+)\s*(?P<tu>[kKmMgGtT]?[iI]?[bB]?)"
+)
+_PCT_RE = re.compile(r"(?P<pct>\d{1,3})%")
+_RATE_RE = re.compile(r"(?P<rate>[\d.]+)\s*(?P<ru>[kKmMgGtT]?[iI]?[bB]?)/s")
+_ITER_RATE_RE = re.compile(r"[\d.]+\s*[kKmMgGtT]?it/s")  # tqdm iteration bar, e.g. "1.23it/s"
+_UNIT_MULTIPLIERS = {
+    "": 1.0, "k": 1e3, "m": 1e6, "g": 1e9, "t": 1e12,
+    "ki": 1024.0, "mi": 1024.0 ** 2, "gi": 1024.0 ** 3, "ti": 1024.0 ** 4,
+}
+_HUMAN_UNITS = ((1e12, "TB"), (1e9, "GB"), (1e6, "MB"), (1e3, "kB"))
+
+
+def _frame_bytes(value: str, unit: str) -> float:
+    """Parse a pip/tqdm style size such as "41.9M", "368 MB" or "2.1MiB"."""
+    number = float(value.replace(",", ""))
+    key = unit[:-1].lower() if unit.lower().endswith("b") else unit.lower()
+    return number * _UNIT_MULTIPLIERS.get(key, 1.0)
+
+
+def _human_bytes(count: float) -> str:
+    for base, label in _HUMAN_UNITS:
+        if count >= base:
+            return f"{count / base:.1f} {label}"
+    return f"{count:.0f} B"
+
+
+def _derive_speed(task: SetupTask, done: float, total: float) -> float | None:
+    """Bytes per second from two consecutive progress frames of the same file."""
+    previous, now = task.speed_prev, time.monotonic()
+    task.speed_prev = (done, total, now)
+    if previous is None:
+        return None
+    prev_done, prev_total, prev_time = previous
+    elapsed = now - prev_time
+    # Counter going down, or the total changing, means the next file started.
+    if elapsed <= 0 or total != prev_total or done <= prev_done:
+        return None
+    return (done - prev_done) / elapsed
+
+
+def _progress_from_frame(task: SetupTask, line: str) -> str | None:
+    """Build the live progress text for one download frame.
+
+    ``None`` means "not a progress frame: log the line normally"; ``""`` means
+    "a progress-style frame to keep out of the log" (e.g. a tqdm iteration bar).
+    """
+    if not _PROGRESS_HEAD_RE.match(line):
+        return None
+    rate = _RATE_RE.search(line)
+    pair = _BYTES_PAIR_RE.search(line)
+    if pair and (pair.group("du") or pair.group("tu")):
+        # A unit is required on at least one side so plain counters such as
+        # the "5/5" of an iteration bar are not read as bytes.
+        # Byte pair wins over percent; a unit missing on one side is borrowed
+        # from the other ("166/368 MB" -> both sides are MB).
+        shared = pair.group("du") or pair.group("tu") or ""
+        done = _frame_bytes(pair.group("done"), pair.group("du") or shared)
+        total = _frame_bytes(pair.group("total"), pair.group("tu") or shared)
+        if total <= 0:
+            return None
+        sizes = f"{_human_bytes(done)}/{_human_bytes(total)}"
+        if rate:
+            task.speed_prev = None
+            return f"{sizes} · {rate.group('rate')} {rate.group('ru').upper()}/s"
+        speed = _derive_speed(task, done, total)
+        return f"{sizes} · {_human_bytes(speed)}/s" if speed else f"{sizes} · 计算速度中…"
+    if rate or _ITER_RATE_RE.search(line):
+        # A bar frame without a byte pair, e.g. a tqdm iteration bar
+        # ("4/5 [00:05<00:01, 1.23it/s]") → keep out of the log.
+        return ""
+    percent = _PCT_RE.search(line)
+    if percent and int(percent.group("pct")) <= 100:
+        return f"{percent.group('pct')}%"
+    return None
+
+
+def _consume_output(task: SetupTask, text: str) -> None:
+    """Log normal output lines; turn pip/tqdm progress frames into live progress."""
+    for raw in re.split(r"[\r\n]+", text):
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        match = _PIP_SPEED_RE.search(line)
+        if match:
+            task.speed_prev = None
+            task.set_progress(
+                f"{match.group(1)}/{match.group(2)} {match.group(3)} · {match.group(4)}")
+            continue
+        progress = _progress_from_frame(task, line)
+        if progress is not None:
+            # Progress frames repeat hundreds of times per second; keep them
+            # out of the log and surface only the latest snapshot in the UI.
+            task.set_progress(progress)
+            continue
+        task.speed_prev = None
+        task.log(line)
+
+
 def _run_step(task: SetupTask, argv: list[str], cwd: Path | None = None,
               env: dict | None = None) -> None:
     task.log("$ " + " ".join(str(a) for a in argv))
@@ -745,12 +918,13 @@ def _run_step(task: SetupTask, argv: list[str], cwd: Path | None = None,
     task.process = proc
     assert proc.stdout is not None
     for line in proc.stdout:
-        task.log(line.rstrip())
+        _consume_output(task, line)
         if task.cancelled:
             kill_tree(proc)
             break
     code = proc.wait()
     task.process = None
+    task.set_progress("")
     if task.cancelled:
         raise RuntimeError("已取消")
     if code != 0:
@@ -779,27 +953,34 @@ def _ensure_venv(task: SetupTask, root: Path, configured_base: str) -> Path:
 
 def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
                    flow_server=None) -> SetupTask:
+    proxy = str(cfg["engines"].get(engine, {}).get("proxy") or "").strip()
+    # PIP_PROGRESS_BAR=on makes pip print live speed frames even when stdout is
+    # a pipe; _consume_output turns those frames into the task's progress field.
+    pip_base_env = {"PIP_PROGRESS_BAR": "on"}
     if engine == "instanthmr":
         root = Path(cfg["engines"]["instanthmr"]["root"])
         if not root.is_dir():
             raise RuntimeError(f"InstantHMR 目录不存在: {root}")
 
         def runner(task: SetupTask):
+            env, proxy_status = _env_with_proxy(proxy, pip_base_env)
+            task.log(f"下载代理：{proxy_status}")
             venv_python = _ensure_venv(task, root, cfg["engines"]["instanthmr"].get("base_python", "python"))
             task.log("升级 pip…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
-                             "-i", PYPI_MIRROR], cwd=root)
+                             "-i", PYPI_MIRROR], cwd=root, env=env)
             if _has_nvidia_gpu():
                 task.log("检测到 NVIDIA GPU：安装 CUDA 12.6 版 PyTorch（约 2.5 GB，走阿里云镜像）…")
                 _run_step(task, [str(venv_python), "-m", "pip", "install",
-                                 INSTANT_TORCH_CUDA_WHEEL, INSTANT_TORCHVISION_CUDA_WHEEL], cwd=root)
+                                 INSTANT_TORCH_CUDA_WHEEL, INSTANT_TORCHVISION_CUDA_WHEEL],
+                          cwd=root, env=env)
             else:
                 task.log("未检测到 NVIDIA GPU：安装 CPU 版 PyTorch。")
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "torch", "torchvision",
-                                 "-i", PYPI_MIRROR], cwd=root)
+                                 "-i", PYPI_MIRROR], cwd=root, env=env)
             task.log("安装 requirements.txt（首次可能需要较长时间，走阿里云镜像）…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
-                             "-r", "requirements.txt"], cwd=root)
+                             "-r", "requirements.txt"], cwd=root, env=env)
             task.log("校验运行依赖…")
             clear_caches()
             deps = check_modules(str(venv_python), INSTANT_MODULES, ttl=0)
@@ -824,14 +1005,17 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
         bundled = root / "runtime" / "python.exe"
         if bundled.is_file():
             def runner(task: SetupTask):
+                env, proxy_status = _env_with_proxy(proxy, {
+                    "PIP_PROGRESS_BAR": "on",
+                    "HF_HOME": str(root / ".cache" / "huggingface"),
+                    "TORCH_HOME": str(root / ".cache" / "torch"),
+                })
+                task.log(f"下载代理：{proxy_status}")
                 task.log(f"检测到内置运行环境: {bundled}")
                 task.log("正在检查推理运行环境（PyTorch）；首次会自动下载匹配显卡的版本。")
                 worker = cfgmod.BASE_DIR / "workers" / "flowhmr_runtime.py"
                 _run_step(task, [str(bundled), str(worker), "--root", str(root)], cwd=root,
-                          env=_setup_env({
-                              "HF_HOME": str(root / ".cache" / "huggingface"),
-                              "TORCH_HOME": str(root / ".cache" / "torch"),
-                          }))
+                          env=env)
                 if not any("[runtime] restart required" in line for line in task.lines):
                     return
                 if flow_server is None:
@@ -856,6 +1040,8 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             return manager.start("自动配置 FlowHMR 环境", engine, runner)
 
         def runner(task: SetupTask):
+            env, proxy_status = _env_with_proxy(proxy, pip_base_env)
+            task.log(f"下载代理：{proxy_status}")
             base_python = str(cfg["engines"]["flowhmr"].get("base_python") or "py -3.10")
             if "3.10" not in base_python:
                 task.log(f"FlowHMR 需要 Python 3.10（当前基础 Python 为 {base_python}），改用 py -3.10")
@@ -863,11 +1049,12 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             venv_python = _ensure_venv(task, root, base_python)
             task.log("升级 pip…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
-                             "-i", PYPI_MIRROR], cwd=root)
+                             "-i", PYPI_MIRROR], cwd=root, env=env)
             if os.name == "nt":
                 task.log("安装 CUDA 12.8 版 PyTorch（Python 3.10，走阿里云镜像）…")
                 _run_step(task, [str(venv_python), "-m", "pip", "install",
-                                 FLOW_TORCH_CUDA_WHEEL, FLOW_TORCHVISION_CUDA_WHEEL], cwd=root)
+                                 FLOW_TORCH_CUDA_WHEEL, FLOW_TORCHVISION_CUDA_WHEEL],
+                          cwd=root, env=env)
             req = root / ("requirements-windows.txt" if os.name == "nt"
                           and (root / "requirements-windows.txt").is_file()
                           else "requirements.txt")
@@ -889,7 +1076,7 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             task.log(f"安装 {req.name} 的其余依赖（体积很大，走阿里云镜像）…")
             try:
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
-                                 "-r", str(install_req)], cwd=root)
+                                 "-r", str(install_req)], cwd=root, env=env)
             finally:
                 if install_req != req:
                     install_req.unlink(missing_ok=True)
@@ -897,14 +1084,14 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             if web_req.is_file():
                 task.log("安装 Web/感知依赖…")
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
-                                 "-r", str(web_req)], cwd=root)
+                                 "-r", str(web_req)], cwd=root, env=env)
             yolox = root / "third_party" / "YOLOX"
             if yolox.is_dir():
                 task.log("安装 YOLOX（editable）…")
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
-                                 "wheel"], cwd=root)
+                                 "wheel"], cwd=root, env=env)
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "--no-build-isolation",
-                                 "--no-deps", "-e", str(yolox)], cwd=root)
+                                 "--no-deps", "-e", str(yolox)], cwd=root, env=env)
             task.log("校验运行依赖…")
             clear_caches()
             deps = check_modules(str(venv_python), FLOWHMR_MODULES, ttl=0)
@@ -928,24 +1115,27 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             raise RuntimeError(f"GEM-X 目录不存在: {root}")
 
         def runner(task: SetupTask):
+            env, proxy_status = _env_with_proxy(proxy, pip_base_env)
+            task.log(f"下载代理：{proxy_status}")
             venv_python = _ensure_venv(task, root, cfg["engines"]["gemx"].get("base_python", "python"))
             task.log("升级 pip…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
-                             "-i", PYPI_MIRROR], cwd=root)
+                             "-i", PYPI_MIRROR], cwd=root, env=env)
             if _has_nvidia_gpu():
                 task.log("检测到 NVIDIA GPU：安装 CUDA 版 PyTorch（约 2.9 GB，走阿里云镜像）…")
                 _run_step(task, [str(venv_python), "-m", "pip", "install",
-                                 GEMX_TORCH_CUDA_WHEEL], cwd=root)
+                                 GEMX_TORCH_CUDA_WHEEL], cwd=root, env=env)
             else:
                 task.log("未检测到 NVIDIA GPU：使用 CPU 版 PyTorch。")
             task.log("安装 GEM-X（含 transformers / onnxruntime 等依赖，走阿里云镜像）…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
-                             "-e", ".[video]"], cwd=root)
+                             "-e", ".[video]"], cwd=root, env=env)
             if _has_nvidia_gpu():
                 task.log("检测到 NVIDIA GPU：把检测器运行时换成 GPU 版 ONNXRuntime…")
-                _run_step(task, [str(venv_python), "-m", "pip", "uninstall", "-y", "onnxruntime"], cwd=root)
+                _run_step(task, [str(venv_python), "-m", "pip", "uninstall", "-y", "onnxruntime"],
+                          cwd=root, env=env)
                 _run_step(task, [str(venv_python), "-m", "pip", "install", "-i", PYPI_MIRROR,
-                                 "onnxruntime-gpu>=1.20,<2"], cwd=root)
+                                 "onnxruntime-gpu>=1.20,<2"], cwd=root, env=env)
             task.log("校验运行依赖…")
             clear_caches()
             deps = check_modules(str(venv_python), GEMX_MODULES, ttl=0)
@@ -971,6 +1161,8 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
         mirror = "https://mirrors.aliyun.com/pypi/simple/"
 
         def runner(task: SetupTask):
+            env, proxy_status = _env_with_proxy(proxy, pip_base_env)
+            task.log(f"下载代理：{proxy_status}")
             root.mkdir(parents=True, exist_ok=True)
             task.log("检查内置 TDPT 源码…")
             for name in ("tdpt_vnect.py", "demo.py", "requirements.txt"):
@@ -984,10 +1176,10 @@ def setup_env_task(cfg: dict, manager: SetupManager, engine: str, update_config,
             venv_python = _ensure_venv(task, root, cfg["engines"]["tdpt"].get("base_python", "python"))
             task.log("升级 pip…")
             _run_step(task, [str(venv_python), "-m", "pip", "install", "--upgrade", "pip",
-                             "-i", mirror], cwd=root)
+                             "-i", mirror], cwd=root, env=env)
             task.log("安装 requirements.txt（onnxruntime / opencv / numpy，走阿里云镜像）…")
             _run_step(task, [str(venv_python), "-m", "pip", "install",
-                             "-i", mirror, "-r", "requirements.txt"], cwd=root)
+                             "-i", mirror, "-r", "requirements.txt"], cwd=root, env=env)
             task.log("校验运行依赖…")
             clear_caches()
             deps = check_modules(str(venv_python), TDPT_MODULES, ttl=0)
@@ -1027,6 +1219,7 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
         base_env = {"HF_HOME": str(root / ".cache" / "huggingface")}
 
         def runner(task: SetupTask):
+            task.log(f"下载代理：{proxy or '未配置（直连）'}")
             argv = [python, str(worker), "--models-dir", str(models_dir),
                     "--model", tier, "--fit", str(fit), "--body"]
             try:
@@ -1059,6 +1252,7 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
         }
 
         def runner(task: SetupTask):
+            task.log(f"下载代理：{proxy or '未配置（直连）'}")
             argv = [python, str(script)]
             try:
                 _run_step(task, argv, cwd=root, env=_proxy_env(proxy, base_env))
@@ -1084,6 +1278,7 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
         proxy = str(eng.get("proxy") or "").strip()
 
         def runner(task: SetupTask):
+            task.log(f"下载代理：{proxy or '未配置（直连）'}")
             env = _setup_env({
                 "HF_HOME": str(root / ".cache" / "huggingface"),
             })
@@ -1110,6 +1305,7 @@ def setup_models_task(cfg: dict, manager: SetupManager, engine: str, payload: di
         proxy = str(eng.get("proxy") or "").strip()
 
         def runner(task: SetupTask):
+            task.log(f"下载代理：{proxy or '未配置（直连）'}")
             _run_step(task, [python, str(worker), "--models-dir", str(models_dir),
                              "--proxy", proxy], cwd=root)
             task.log("模型下载完成。")

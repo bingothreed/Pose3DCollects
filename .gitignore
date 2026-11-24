@@ -18,3 +18,5 @@ engines/*/runtime/
 engines/*/.cache/
 engines/*/logs/
 engines/*/output/
+engines/instanthmr/roboflow/
+.workbuddy/

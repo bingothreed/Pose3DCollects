@@ -82,5 +82,7 @@ export const stopInstantCamera = () => postJson("/api/instanthmr/camera/stop", {
 export const startTdptCamera = (payload = {}) => postJson("/api/tdpt/camera/start", payload);
 export const stopTdptCamera = () => postJson("/api/tdpt/camera/stop", {});
 
+export const testProxy = (proxy) => postJson("/api/proxy/test", { proxy });
+
 export const openFolder = (engine, which) => postJson("/api/open-folder", { engine, which });
 export const openPath = (path) => postJson("/api/open-path", { path });

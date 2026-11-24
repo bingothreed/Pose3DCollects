@@ -1,7 +1,5 @@
 # `models/` — 本地 ONNX 权重（**不入库**）
 
-> Pose3D Collects 默认使用 `engines/instanthmr/models/`；可在 **设置与资源 → InstantHMR → 模型目录** 修改。本文件是占位说明，模型文件本身被 gitignore。
-
 这里放 `demo.py` 直接加载的 `.onnx` 图。目录内容被 `.gitignore` 忽略（`models/*`，只有本文件入库），
 所以换机器时不需要 clone 这些大文件，按下面重新下载即可。
 
